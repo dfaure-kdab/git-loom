@@ -69,7 +69,9 @@ Rewriting the target changes the hash of every commit above it, so any merge
 commit in the way has to be rebuilt rather than reused. A merge that was
 originally resolved by hand will conflict again, because a merge commit records
 its result tree, not the resolution that produced it. (`rerere`, when enabled,
-replays the recorded resolution and the conflict resolves itself.)
+replays the recorded resolution, so the file has no conflict markers — but the
+rebase still stops, and `loom continue` is what finishes it. `rerere.autoUpdate`
+stages the replayed resolution as well, leaving nothing to do but continue.)
 
 When that happens the reword pauses instead of discarding the amend:
 

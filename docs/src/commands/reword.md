@@ -36,7 +36,7 @@ Changes the commit message using git's native interactive rebase. All descendant
 
 #### Conflicts
 
-Every commit above the target gets a new hash, so any merge commit in the way has to be rebuilt instead of reused. A merge you originally resolved by hand will conflict again — a merge commit records the tree it produced, never the resolution that produced it. (With `rerere` enabled, git replays your recorded resolution and you will usually not see the conflict at all.)
+Every commit above the target gets a new hash, so any merge commit in the way has to be rebuilt instead of reused. A merge you originally resolved by hand will conflict again — a merge commit records the tree it produced, never the resolution that produced it. (With `rerere` enabled, git replays your recorded resolution, so the file has no conflict markers — the reword still pauses, and you stage the replayed resolution before `loom continue`.)
 
 When that happens the reword pauses rather than throwing away the new message:
 
@@ -48,6 +48,14 @@ git loom reword ab -m "Fix authentication bug"
 
 git add shared.rs && git loom continue
 # ✓ Updated commit message for `ab12cd3` (now `e45f678`)
+```
+
+With `rerere.autoUpdate` set, git stages the replayed resolution too, and the pause says so:
+
+```bash
+# ! `rerere` resolved the conflicts for you — review the result, then run:
+#   `loom continue`   to complete the reword
+#   `loom abort`      to cancel and restore original state
 ```
 
 `git loom abort` restores the original message, HEAD, and every branch ref. See [continue](continue.md) and [abort](abort.md).

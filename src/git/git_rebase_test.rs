@@ -150,3 +150,155 @@ fn a_failed_abort_skips_the_cleanup_and_keeps_the_cause() {
     std::fs::remove_file(&lock).unwrap();
     super::rebase_abort(&workdir).unwrap();
 }
+
+/// Build a repo where `rerere` has recorded a resolution for a conflict, then
+/// replay that same conflict in a rebase. With `rerere.autoUpdate` on, git
+/// stages the recorded resolution and the stop leaves a clean index — which
+/// must not be mistaken for a rebase that broke down.
+#[test]
+fn rerere_resolved_stop_is_still_a_conflict() {
+    let test_repo = TestRepo::new();
+    test_repo.set_config("rerere.enabled", "true");
+    test_repo.set_config("rerere.autoUpdate", "true");
+    let workdir = test_repo.workdir();
+
+    test_repo.write_file("f.txt", "base\n");
+    test_repo.stage_files(&["f.txt"]);
+    test_repo.commit_staged("base");
+    let base = test_repo.head_oid().to_string();
+
+    test_repo.write_file("f.txt", "onto side\n");
+    test_repo.stage_files(&["f.txt"]);
+    test_repo.commit_staged("onto side");
+    let onto = test_repo.head_oid().to_string();
+
+    // The same conflicting topic twice: the first rebase records the
+    // resolution, the second one has rerere replay it.
+    let conflict_on = |topic: &str| {
+        test_repo.create_branch_at(topic, &base);
+        test_repo.switch_branch(topic);
+        test_repo.write_file("f.txt", "topic side\n");
+        test_repo.stage_files(&["f.txt"]);
+        test_repo.commit_staged("topic side");
+        crate::git::run_git(&workdir, &["rebase", &onto]).unwrap_err();
+        assert!(
+            super::rebase_is_in_progress(test_repo.repo.path()),
+            "the conflict must be what stopped the rebase"
+        );
+    };
+
+    conflict_on("topic1");
+    test_repo.write_file("f.txt", "resolved\n");
+    crate::git::run_git(&workdir, &["add", "f.txt"]).unwrap();
+    crate::git::run_git(&workdir, &["rebase", "--continue"]).unwrap();
+
+    conflict_on("topic2");
+
+    assert!(
+        super::rebase_is_in_progress(test_repo.repo.path()),
+        "the replayed conflict still stops the rebase"
+    );
+    assert_eq!(
+        test_repo.read_file("f.txt"),
+        "resolved\n",
+        "rerere should have replayed the recorded resolution"
+    );
+    assert!(
+        !super::has_unmerged_paths(&workdir),
+        "rerere staged its resolution, so nothing is left unmerged"
+    );
+    assert!(
+        super::auto_merge_id(&workdir).is_some(),
+        "the stop must still count as a conflict"
+    );
+
+    let err = super::abort_after_failure(&workdir).to_string();
+    assert!(
+        err.contains("Rebase failed with conflicts"),
+        "a stop rerere resolved is still a conflict to report: {err}"
+    );
+}
+
+/// The reftable backend keeps refs in `.git/reftable/`, so `AUTO_MERGE` is no
+/// file under the git dir there — reading it must go through git.
+#[test]
+fn auto_merge_id_works_on_a_reftable_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    let workdir = dir.path().to_path_buf();
+    let init = std::process::Command::new("git")
+        .current_dir(&workdir)
+        .args(["init", "--ref-format=reftable"])
+        .output()
+        .unwrap();
+    if !init.status.success() {
+        eprintln!("skipping: this git has no reftable backend");
+        return;
+    }
+    for (key, value) in [("user.name", "Test"), ("user.email", "test@example.com")] {
+        crate::git::run_git(&workdir, &["config", key, value]).unwrap();
+    }
+
+    let write = |content: &str| std::fs::write(workdir.join("f.txt"), content).unwrap();
+    let commit = |message: &str| {
+        crate::git::run_git(&workdir, &["add", "f.txt"]).unwrap();
+        crate::git::run_git(&workdir, &["commit", "-m", message]).unwrap();
+    };
+    write("base\n");
+    commit("base");
+    crate::git::run_git(&workdir, &["branch", "topic"]).unwrap();
+    write("onto side\n");
+    commit("onto side");
+    let onto = crate::git::run_git_stdout(&workdir, &["rev-parse", "HEAD"]).unwrap();
+    crate::git::run_git(&workdir, &["switch", "topic"]).unwrap();
+    write("topic side\n");
+    commit("topic side");
+    crate::git::run_git(&workdir, &["rebase", onto.trim()]).unwrap_err();
+
+    assert!(
+        !workdir.join(".git/AUTO_MERGE").exists(),
+        "reftable keeps no AUTO_MERGE file — that is the point of this test"
+    );
+    assert!(
+        super::auto_merge_id(&workdir).is_some(),
+        "the conflict must be recognized on a reftable repo too"
+    );
+}
+
+/// An untracked file in the way of a picked commit stops the rebase with a
+/// clean index and no conflict — with `rerere` enabled too, which is what made
+/// `MERGE_RR` useless as a signal: git writes it for any sequencer pick.
+#[test]
+fn untracked_file_stop_is_not_a_conflict() {
+    let test_repo = TestRepo::new();
+    test_repo.set_config("rerere.enabled", "true");
+    let workdir = test_repo.workdir();
+
+    test_repo.commit("base", "a.txt");
+    let base = test_repo.head_oid().to_string();
+    test_repo.write_file("foo.txt", "committed\n");
+    test_repo.stage_files(&["foo.txt"]);
+    crate::git::run_git(&workdir, &["commit", "-m", "add foo.txt"]).unwrap();
+    let add_foo = test_repo.head_oid().to_string();
+    crate::git::run_git(&workdir, &["rm", "-q", "foo.txt"]).unwrap();
+    crate::git::run_git(&workdir, &["commit", "-m", "delete foo.txt"]).unwrap();
+    let delete_foo = test_repo.head_oid().to_string();
+
+    // Replaying "add foo.txt" on top of the deletion cannot write the file:
+    // the user has an untracked one there.
+    test_repo.write_file("foo.txt", "untracked\n");
+    crate::git::run_git(
+        &workdir,
+        &["rebase", "--onto", &delete_foo, &base, &add_foo],
+    )
+    .unwrap_err();
+
+    assert!(
+        super::rebase_is_in_progress(test_repo.repo.path()),
+        "the blocked pick stops the rebase"
+    );
+    assert!(!super::has_unmerged_paths(&workdir));
+    assert!(
+        super::auto_merge_id(&workdir).is_none(),
+        "an untracked file in the way is not a conflict"
+    );
+}

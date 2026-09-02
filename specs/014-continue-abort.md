@@ -61,11 +61,34 @@ A conflict is the usual reason a rebase stops, but not the only one: an
 untracked file in the way of a picked commit, a stale `index.lock`, a
 permission or disk error all leave the rebase paused with a clean index.
 
-Loom therefore checks for unmerged paths before describing the pause. With
-none, the message says the rebase stopped part-way and points at `loom trace`
-instead of telling the user to resolve conflicts that do not exist. This
-applies both to the pause message of a resumable command and to the error an
-out-of-scope command reports after aborting.
+A clean index can also mean the opposite of a breakdown: `rerere` replays a
+recorded resolution, and with `rerere.autoUpdate` it stages the result, so the
+rebase stops on a conflict that is already resolved.
+
+Loom therefore describes the pause from what it finds:
+
+| State | Message |
+|-------|---------|
+| Unmerged paths | Conflicts detected — resolve them |
+| Clean index, new `AUTO_MERGE` | `rerere` resolved the conflicts — review the result |
+| Clean index, unchanged or no `AUTO_MERGE` | The operation stopped part-way — run `loom trace` |
+
+`AUTO_MERGE` is the ref git keeps while a conflicted merge is unfinished — a
+conflicted pick during a rebase included — and drops once the resolution is
+committed, so it describes the stop at hand and not an earlier one. Loom reads
+it with `git rev-parse`, never as a file under the git dir: it is a ref, and the
+reftable backend writes no file of that name. Only the `ort` merge strategy
+writes it; under another strategy loom falls back to the generic message.
+
+"New" means the id changed. `loom continue` therefore reads the id before
+running git's `--continue` and compares it with the one left behind: an
+unchanged id is the conflict the user was already on, so nothing resolved it for
+them and the step failed for another reason — a hook rejecting the commit, say.
+Without that check, a `git merge --continue` a hook turned down would be
+reported as `rerere` having done the work.
+
+The same distinction applies to the error an out-of-scope command reports after
+aborting: a stop `rerere` resolved is still a conflict.
 
 ## Exit 0 Is Not "Finished"
 
