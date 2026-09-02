@@ -153,7 +153,7 @@ pub fn run(
             post_commit(&workdir, &branch_name, &saved_staged)?;
         }
         RebaseOutcome::Stopped => {
-            transaction::warn_conflict_paused(&workdir, "commit");
+            transaction::warn_paused(&workdir, "commit");
         }
         RebaseOutcome::Paused => {
             transaction::warn_paused_at_edit(Some("commit"));

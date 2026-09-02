@@ -171,11 +171,12 @@ fn pause_reason(workdir: &Path, before: Option<&str>) -> PauseReason {
     }
 }
 
-/// Emit the pause warning for a resumable command whose rebase stopped.
+/// Emit the pause warning for a resumable command whose rebase or merge
+/// stopped.
 ///
 /// A conflict to resolve is the usual reason, but not the only one, so the
 /// message follows what git left behind.
-pub fn warn_conflict_paused(workdir: &Path, command: &str) {
+pub fn warn_paused(workdir: &Path, command: &str) {
     let (note, hint, cause) = match pause_reason(workdir, None) {
         PauseReason::Conflicts => (
             format!("Conflicts detected — the `loom {}` is paused", command),
