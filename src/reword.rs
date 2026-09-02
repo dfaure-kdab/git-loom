@@ -128,7 +128,7 @@ pub fn reword_commit(repo: &Repository, commit_hash: &str, message: Option<Strin
             report_reworded(&ctx);
         }
         git::RebaseOutcome::Stopped => {
-            transaction::warn_conflict_paused(workdir, "reword");
+            transaction::warn_paused(workdir, "reword");
         }
         git::RebaseOutcome::Paused => {
             transaction::warn_paused_at_edit(Some("reword"));

@@ -303,7 +303,7 @@ fn apply_plan(repo: &Repository, workdir: &Path, git_dir: &Path, plan: AbsorbPla
             )?;
         }
         RebaseOutcome::Stopped => {
-            transaction::warn_conflict_paused(workdir, "absorb");
+            transaction::warn_paused(workdir, "absorb");
         }
         RebaseOutcome::Paused => {
             transaction::warn_paused_at_edit(Some("absorb"));

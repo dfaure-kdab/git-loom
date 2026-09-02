@@ -1011,7 +1011,7 @@ fn squash_fixup_into_commit(
             Ok(FixupOutcome::Paused)
         }
         RebaseOutcome::Stopped => {
-            transaction::warn_conflict_paused(workdir, COMMAND);
+            transaction::warn_paused(workdir, COMMAND);
             Ok(FixupOutcome::Paused)
         }
     }
@@ -1071,7 +1071,7 @@ fn fold_commit_into_commit(repo: &Repository, source_hash: &str, target_hash: &s
             transaction::warn_paused_at_edit(Some(COMMAND));
         }
         RebaseOutcome::Stopped => {
-            transaction::warn_conflict_paused(workdir, COMMAND);
+            transaction::warn_paused(workdir, COMMAND);
         }
     }
 
@@ -1109,7 +1109,7 @@ fn fold_commit_to_branch(repo: &Repository, commit_hash: &str, branch_name: &str
             transaction::warn_paused_at_edit(Some(COMMAND));
         }
         RebaseOutcome::Stopped => {
-            transaction::warn_conflict_paused(workdir, COMMAND);
+            transaction::warn_paused(workdir, COMMAND);
         }
     }
 
@@ -1494,7 +1494,7 @@ fn fold_commit_to_unstaged(repo: &Repository, commit_hash: &str) -> Result<()> {
                 return Ok(());
             }
             RebaseOutcome::Stopped => {
-                transaction::warn_conflict_paused(workdir, COMMAND);
+                transaction::warn_paused(workdir, COMMAND);
                 return Ok(());
             }
         }

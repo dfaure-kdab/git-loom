@@ -156,7 +156,7 @@ pub fn run(skip_confirm: bool) -> Result<()> {
         }
         Ok(RebaseOutcome::Stopped) => {
             spinner.error("Rebase paused");
-            transaction::warn_conflict_paused(&workdir, "update");
+            transaction::warn_paused(&workdir, "update");
         }
         Ok(RebaseOutcome::Paused) => {
             spinner.error("Rebase paused");

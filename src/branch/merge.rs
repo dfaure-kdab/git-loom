@@ -54,7 +54,7 @@ pub fn run(branch: Option<String>, all: bool) -> Result<()> {
                 })?,
             };
             transaction::save(&git_dir, &state)?;
-            transaction::warn_conflict_paused(workdir, "merge");
+            transaction::warn_paused(workdir, "merge");
         }
     }
 
