@@ -194,7 +194,7 @@ pub fn rebase_abort_then_cleanup(
 /// process), and the abort itself may fail — saying "aborted" then would strand
 /// the user in a half-rewritten repository.
 pub fn abort_after_failure(workdir: &Path) -> anyhow::Error {
-    let conflicted = has_unmerged_paths(workdir);
+    let conflicted = has_unmerged_paths(workdir) || auto_merge_id(workdir).is_some();
     match rebase_abort(workdir) {
         Ok(()) if conflicted => anyhow::anyhow!("Rebase failed with conflicts — aborted"),
         Ok(()) => anyhow::anyhow!(
@@ -214,6 +214,26 @@ pub fn abort_after_failure(workdir: &Path) -> anyhow::Error {
 pub fn has_unmerged_paths(workdir: &Path) -> bool {
     super::run_git_stdout(workdir, &["diff", "--name-only", "--diff-filter=U"])
         .is_ok_and(|out| !out.trim().is_empty())
+}
+
+/// The id of `AUTO_MERGE`, the ref git keeps while a conflicted merge is
+/// unfinished — a conflicted pick during a rebase included — and drops once the
+/// resolution is committed. `Some` therefore means the stop came from a
+/// conflict, resolved or not.
+///
+/// The id names *which* conflict, so a caller that read it before continuing
+/// can tell a fresh conflict from the one it was already on.
+///
+/// Asks git rather than looking for a file under the git dir: `AUTO_MERGE` is a
+/// ref, and the reftable backend keeps no file of that name.
+///
+/// Only the `ort` merge strategy writes the ref; under any other strategy this
+/// reports `None` and the caller falls back to its generic message.
+pub fn auto_merge_id(workdir: &Path) -> Option<String> {
+    let out =
+        super::run_git_stdout(workdir, &["rev-parse", "--verify", "--quiet", "AUTO_MERGE"]).ok()?;
+    let id = out.trim().to_string();
+    (!id.is_empty()).then_some(id)
 }
 
 /// Continue a rebase whose todo this caller filled with `edit` steps, aborting

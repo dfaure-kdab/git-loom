@@ -27,9 +27,9 @@ pub use git_merge::{MergeOutcome, continue_merge, merge_abort, merge_is_in_progr
 #[cfg(test)]
 pub use git_rebase::rebase_onto;
 pub use git_rebase::{
-    RebaseOutcome, abort_after_failure, continue_rebase, continue_rebase_expecting_edit,
-    has_unmerged_paths, rebase, rebase_abort, rebase_abort_then_cleanup, rebase_is_in_progress,
-    rebase_progress,
+    RebaseOutcome, abort_after_failure, auto_merge_id, continue_rebase,
+    continue_rebase_expecting_edit, has_unmerged_paths, rebase, rebase_abort,
+    rebase_abort_then_cleanup, rebase_is_in_progress, rebase_progress,
 };
 pub use git_worktree::ensure_not_checked_out_elsewhere;
 

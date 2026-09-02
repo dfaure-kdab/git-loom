@@ -142,38 +142,67 @@ pub fn delete(git_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Why a rebase or merge stopped, as far as git's leftover state can tell.
+#[derive(Debug, PartialEq, Eq)]
+enum PauseReason {
+    /// Unmerged paths: there is something for the user to resolve.
+    Conflicts,
+    /// A conflict the user never had to touch: `rerere` replayed a recorded
+    /// resolution, and `rerere.autoUpdate` staged it.
+    ResolvedConflicts,
+    /// Anything else: an untracked file in the way, a failing `exec`, a stale
+    /// `index.lock`, a hook rejecting the commit a `--continue` tried to make.
+    Other,
+}
+
+/// Classify a stop from the state git left behind.
+///
+/// `before` is the `AUTO_MERGE` id from before the step that just stopped, if
+/// there was one. A resolved conflict is only news when that id changed: an
+/// unchanged one is the conflict the user was already on, so nothing resolved
+/// it for them and the step failed for some other reason.
+fn pause_reason(workdir: &Path, before: Option<&str>) -> PauseReason {
+    if git::has_unmerged_paths(workdir) {
+        PauseReason::Conflicts
+    } else if git::auto_merge_id(workdir).is_some_and(|id| Some(id.as_str()) != before) {
+        PauseReason::ResolvedConflicts
+    } else {
+        PauseReason::Other
+    }
+}
+
 /// Emit the pause warning for a resumable command whose rebase stopped.
 ///
-/// A conflict is the usual reason, but not the only one (an untracked file in
-/// the way, a stale `index.lock`), so the message follows what the index
-/// actually says.
+/// A conflict to resolve is the usual reason, but not the only one, so the
+/// message follows what git left behind.
 pub fn warn_conflict_paused(workdir: &Path, command: &str) {
-    if !git::has_unmerged_paths(workdir) {
-        crate::core::agent_mode::note_paused(
-            &format!(
-                "The `loom {}` is paused — the rebase stopped part-way",
+    let (note, hint, cause) = match pause_reason(workdir, None) {
+        PauseReason::Conflicts => (
+            format!("Conflicts detected — the `loom {}` is paused", command),
+            "resolve conflicts, stage them, then run: loom continue (or loom abort)",
+            "Conflicts detected — resolve them with git, then run:",
+        ),
+        PauseReason::ResolvedConflicts => (
+            format!(
+                "`rerere` resolved the conflicts — the `loom {}` is paused",
                 command
             ),
+            "review the resolution, then run: loom continue (or loom abort)",
+            "`rerere` resolved the conflicts for you — review the result, then run:",
+        ),
+        PauseReason::Other => (
+            format!("The `loom {}` is paused — it stopped part-way", command),
             "run loom trace to see why, fix it, then run: loom continue (or loom abort)",
-        );
-        crate::core::msg::warn_reported(&format!(
-            "The rebase stopped part-way — run `loom trace` to see why, then:\n\
-             `loom continue`   to complete the {}\n\
-             `loom abort`      to cancel and restore original state",
-            command
-        ));
-        return;
-    }
+            "The operation stopped part-way — run `loom trace` to see why, then:",
+        ),
+    };
 
-    crate::core::agent_mode::note_paused(
-        &format!("Conflicts detected — the `loom {}` is paused", command),
-        "resolve conflicts, stage them, then run: loom continue (or loom abort)",
-    );
+    crate::core::agent_mode::note_paused(&note, hint);
     crate::core::msg::warn_reported(&format!(
-        "Conflicts detected — resolve them with git, then run:\n\
+        "{}\n\
          `loom continue`   to complete the {}\n\
          `loom abort`      to cancel and restore original state",
-        command
+        cause, command
     ));
 }
 
@@ -210,26 +239,36 @@ pub fn warn_paused_at_edit(command: Option<&str>) {
 ///
 /// `subject` names what is still paused: the loom operation, or the bare
 /// `rebase`/`merge` when no state file says which command it belongs to.
-fn warn_still_paused(workdir: &Path, subject: &str) {
-    if !git::has_unmerged_paths(workdir) {
-        crate::core::agent_mode::note_paused(
-            &format!("The {} stopped again — it is still paused", subject),
+/// `auto_merge_before` is the `AUTO_MERGE` id read before the `--continue`, so
+/// the conflict just resolved can be told from the one the user was on.
+fn warn_still_paused(workdir: &Path, subject: &str, auto_merge_before: Option<&str>) {
+    let (note, hint, body) = match pause_reason(workdir, auto_merge_before) {
+        PauseReason::Conflicts => (
+            format!("Conflicts remain — the {} is still paused", subject),
+            "resolve conflicts, stage them, then run: loom continue (or loom abort)",
+            "Conflicts remain — resolve them and run `loom continue` again".to_string(),
+        ),
+        PauseReason::ResolvedConflicts => (
+            format!(
+                "`rerere` resolved the next conflicts — the {} is still paused",
+                subject
+            ),
+            "review the resolution, then run: loom continue (or loom abort)",
+            "`rerere` resolved the next conflicts — review the result and run `loom continue` again"
+                .to_string(),
+        ),
+        PauseReason::Other => (
+            format!("The {} stopped again — it is still paused", subject),
             "run loom trace to see why, fix it, then run: loom continue (or loom abort)",
-        );
-        crate::core::msg::warn_reported(&format!(
-            "The {} stopped again — run `loom trace` to see why, then `loom continue`",
-            subject
-        ));
-        return;
-    }
+            format!(
+                "The {} stopped again — run `loom trace` to see why, then `loom continue`",
+                subject
+            ),
+        ),
+    };
 
-    crate::core::agent_mode::note_paused(
-        &format!("Conflicts remain — the {} is still paused", subject),
-        "resolve conflicts, stage them, then run: loom continue (or loom abort)",
-    );
-    crate::core::msg::warn_reported(
-        "Conflicts remain — resolve them and run `loom continue` again",
-    );
+    crate::core::agent_mode::note_paused(&note, hint);
+    crate::core::msg::warn_reported(&body);
 }
 
 /// Run `loom continue` (opens repo internally).
@@ -259,6 +298,9 @@ pub fn continue_cmd(workdir: &Path, git_dir: &Path) -> Result<()> {
         return continue_without_state(workdir, git_dir);
     };
 
+    // Read before continuing: `AUTO_MERGE` only says which conflict git is on
+    // once there is something to compare it against.
+    let auto_merge_before = git::auto_merge_id(workdir);
     if git::rebase_is_in_progress(git_dir) {
         match git::continue_rebase(workdir)? {
             git::RebaseOutcome::Paused => {
@@ -266,7 +308,7 @@ pub fn continue_cmd(workdir: &Path, git_dir: &Path) -> Result<()> {
                 return Ok(());
             }
             git::RebaseOutcome::Stopped => {
-                warn_still_paused(workdir, "operation");
+                warn_still_paused(workdir, "operation", auto_merge_before.as_deref());
                 return Ok(());
             }
             git::RebaseOutcome::Completed => {}
@@ -274,7 +316,7 @@ pub fn continue_cmd(workdir: &Path, git_dir: &Path) -> Result<()> {
     } else if git::merge_is_in_progress(git_dir) {
         match git::continue_merge(workdir, git_dir)? {
             git::MergeOutcome::Stopped => {
-                warn_still_paused(workdir, "operation");
+                warn_still_paused(workdir, "operation", auto_merge_before.as_deref());
                 return Ok(());
             }
             git::MergeOutcome::Completed => {}
@@ -362,15 +404,19 @@ impl GitOp {
 /// in progress. A command whose conflict path is not resumable, or one that
 /// died before saving state, can leave one behind.
 fn continue_without_state(workdir: &Path, git_dir: &Path) -> Result<()> {
+    let before = git::auto_merge_id(workdir);
+    let before = before.as_deref();
     if git::rebase_is_in_progress(git_dir) {
         match git::continue_rebase(workdir)? {
             git::RebaseOutcome::Paused => warn_paused_at_edit(None),
-            git::RebaseOutcome::Stopped => warn_still_paused(workdir, GitOp::Rebase.as_str()),
+            git::RebaseOutcome::Stopped => {
+                warn_still_paused(workdir, GitOp::Rebase.as_str(), before)
+            }
             git::RebaseOutcome::Completed => report_stateless_continue(GitOp::Rebase),
         }
     } else if git::merge_is_in_progress(git_dir) {
         match git::continue_merge(workdir, git_dir)? {
-            git::MergeOutcome::Stopped => warn_still_paused(workdir, GitOp::Merge.as_str()),
+            git::MergeOutcome::Stopped => warn_still_paused(workdir, GitOp::Merge.as_str(), before),
             git::MergeOutcome::Completed => report_stateless_continue(GitOp::Merge),
         }
     } else {
@@ -466,6 +512,75 @@ mod tests {
         assert_eq!(restored.command, "commit");
         assert_eq!(restored.rollback.reset_mixed_to, "abc123");
         assert_eq!(restored.rollback.delete_branches, vec!["new-branch"]);
+    }
+
+    /// Stop a rebase on a conflict and return the repo it happened in.
+    fn repo_stopped_on_conflict() -> crate::core::test_helpers::TestRepo {
+        use crate::core::test_helpers::TestRepo;
+        let test_repo = TestRepo::new();
+        let workdir = test_repo.workdir();
+
+        test_repo.write_file("f.txt", "base\n");
+        test_repo.stage_files(&["f.txt"]);
+        test_repo.commit_staged("base");
+        let base = test_repo.head_oid().to_string();
+
+        test_repo.write_file("f.txt", "onto side\n");
+        test_repo.stage_files(&["f.txt"]);
+        test_repo.commit_staged("onto side");
+        let onto = test_repo.head_oid().to_string();
+
+        test_repo.create_branch_at("topic", &base);
+        test_repo.switch_branch("topic");
+        test_repo.write_file("f.txt", "topic side\n");
+        test_repo.stage_files(&["f.txt"]);
+        test_repo.commit_staged("topic side");
+        git::run_git(&workdir, &["rebase", &onto]).unwrap_err();
+        assert!(
+            git::has_unmerged_paths(&workdir),
+            "the rebase must conflict"
+        );
+        test_repo
+    }
+
+    #[test]
+    fn unmerged_paths_are_conflicts_to_resolve() {
+        let test_repo = repo_stopped_on_conflict();
+        assert_eq!(
+            pause_reason(&test_repo.workdir(), None),
+            PauseReason::Conflicts
+        );
+    }
+
+    /// A conflict that is already staged when the operation stops was resolved
+    /// without the user — but only if it is a conflict they had not seen yet.
+    #[test]
+    fn a_staged_conflict_is_resolved_only_when_it_is_a_new_one() {
+        let test_repo = repo_stopped_on_conflict();
+        let workdir = test_repo.workdir();
+        test_repo.write_file("f.txt", "resolved\n");
+        git::run_git(&workdir, &["add", "f.txt"]).unwrap();
+
+        assert_eq!(
+            pause_reason(&workdir, None),
+            PauseReason::ResolvedConflicts,
+            "nothing was pending before, so this conflict resolved itself"
+        );
+
+        // The same conflict the caller was already on: whatever stopped the
+        // step, it was not a conflict being resolved.
+        let same = git::auto_merge_id(&workdir).unwrap();
+        assert_eq!(
+            pause_reason(&workdir, Some(&same)),
+            PauseReason::Other,
+            "an unchanged AUTO_MERGE must not be credited to rerere"
+        );
+    }
+
+    #[test]
+    fn a_clean_stop_has_no_conflict_to_report() {
+        let test_repo = crate::core::test_helpers::TestRepo::new();
+        assert_eq!(pause_reason(&test_repo.workdir(), None), PauseReason::Other);
     }
 
     #[test]
