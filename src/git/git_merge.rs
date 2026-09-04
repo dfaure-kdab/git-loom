@@ -20,8 +20,8 @@ pub fn merge_no_ff(workdir: &Path, git_dir: &Path, branch: &str) -> Result<Merge
 
 /// Continue an in-progress merge (equivalent to `git merge --continue`).
 ///
-/// Note: `--continue` does not accept extra flags like `--no-edit`. The merge
-/// commit message is taken from `MERGE_MSG` without opening an editor.
+/// Note: `--continue` does not accept extra flags like `--no-edit`; `run_git`
+/// suppresses the editor, so the message is taken from `MERGE_MSG` as is.
 pub fn continue_merge(workdir: &Path, git_dir: &Path) -> Result<MergeOutcome> {
     run_merge_cmd(workdir, git_dir, &["merge", "--continue"])
 }

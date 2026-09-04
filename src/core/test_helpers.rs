@@ -144,9 +144,12 @@ impl TestRepo {
         let mut config = repo.config().unwrap();
         config.set_str("user.name", "Test").unwrap();
         config.set_str("user.email", "test@test.com").unwrap();
-        // Prevent git from opening an interactive editor in tests (e.g. for
-        // `git merge --continue` which is equivalent to `git commit`).
-        config.set_str("core.editor", "true").unwrap();
+        // loom must suppress the editor itself (`git merge --continue` is a
+        // `git commit` with no `--no-edit`), so an editor that leaks through
+        // fails the test instead of hanging it. A `GIT_EDITOR` in the
+        // environment overrides this; the default lives in repo config because
+        // the process env is shared by every test running in parallel.
+        config.set_str("core.editor", "false").unwrap();
     }
 
     /// Get the signature used for commits.
@@ -460,6 +463,9 @@ impl TestRepo {
 
     /// Set up a fake editor that replaces commit messages.
     ///
+    /// Only reaches `run_git_interactive` commands: `run_git_captured` sets
+    /// `GIT_EDITOR=true` itself, so captured commands ignore it.
+    ///
     /// # Arguments
     /// * `new_message` - The message that the fake editor will write
     ///
@@ -469,8 +475,10 @@ impl TestRepo {
         // Git on Windows uses Git Bash, so we use the same shell command format for all platforms
         let editor_script = format!("sh -c 'echo \"{}\" > \"$1\"' --", new_message);
 
-        // SAFETY: This is a test environment and we're setting a git-specific env var
-        // that won't affect other tests or the system
+        // SAFETY: `set_var` is process-global, so every test running at the
+        // same time sees this editor. Captured commands ignore `GIT_EDITOR`,
+        // and no other test runs a git command that opens an editor, so
+        // nothing else observes it.
         unsafe {
             std::env::set_var("GIT_EDITOR", &editor_script);
         }

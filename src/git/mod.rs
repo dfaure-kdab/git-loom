@@ -105,12 +105,19 @@ pub fn absolute_git_dir(workdir: &Path) -> Result<PathBuf> {
 }
 
 /// Run a git command, capture output, trace-log it, and bail on failure.
+///
+/// Output is piped, so an editor could never work here: `GIT_EDITOR=true`
+/// keeps commands like `merge --continue` (which has no `--no-edit`) from
+/// opening one and hanging. `GIT_SEQUENCE_EDITOR` falls back to it, so a
+/// captured `rebase -i` must set its own sequence editor (`weave` runs its
+/// own `Command` and sets both).
 fn run_git_captured(workdir: &Path, args: &[&str]) -> Result<std::process::Output> {
     let start = Instant::now();
     let output = Command::new("git")
         .current_dir(workdir)
         .args(FORCED_CONFIG)
         .args(args)
+        .env("GIT_EDITOR", "true")
         .output()?;
 
     let duration_ms = start.elapsed().as_millis();

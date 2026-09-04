@@ -416,6 +416,8 @@ fn woven_repo_with_hand_resolved_merge(test_repo: &TestRepo) -> git2::Oid {
     );
     test_repo.write_file("shared.txt", "first\nfrom-a\nfrom-b\nlast\n");
     test_repo.stage_files(&["shared.txt"]);
+    // Through loom's wrapper on purpose: the test repo has `core.editor=false`,
+    // so this also checks that `continue_merge` suppresses the editor.
     crate::git::continue_merge(&workdir, test_repo.repo.path()).unwrap();
 
     a1
