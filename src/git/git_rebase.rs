@@ -18,42 +18,20 @@ pub enum RebaseOutcome {
 /// Continue an in-progress rebase.
 ///
 /// Returns `Completed` if the rebase finished, `Paused` if it advanced to the
-/// next `edit`/`break` step, or `Stopped` if it stopped again. Does NOT abort —
-/// the caller is responsible.
-///
-/// Suppresses the editor with `GIT_EDITOR=true`, the same way the initial
-/// rebase in `weave::run_rebase` does.
+/// next `edit`/`break` step, or `Stopped` if it stopped again. A failure that
+/// leaves no rebase in progress is an error. Does NOT abort — the caller is
+/// responsible.
 pub fn continue_rebase(workdir: &Path) -> Result<RebaseOutcome> {
-    use std::process::Command;
-    use std::time::Instant;
-
-    use crate::trace as loom_trace;
-
     // Resolve this before continuing: failing afterwards would report an error
     // for a rebase that already moved on, and the caller would keep its state
     // file for a step that is done.
     let git_dir = super::absolute_git_dir(workdir)?;
 
-    let start = Instant::now();
-    let output = Command::new("git")
-        .current_dir(workdir)
-        .args(super::FORCED_CONFIG)
-        .args(["rebase", "--continue"])
-        .env("GIT_EDITOR", "true")
-        .output()?;
-
-    let duration_ms = start.elapsed().as_millis();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    loom_trace::log_command(
-        "git",
-        "rebase --continue",
-        duration_ms,
-        output.status.success(),
-        &stderr,
-    );
-
-    if !output.status.success() {
-        return Ok(RebaseOutcome::Stopped);
+    if let Err(e) = super::run_git(workdir, &["rebase", "--continue"]) {
+        if rebase_is_in_progress(&git_dir) {
+            return Ok(RebaseOutcome::Stopped);
+        }
+        return Err(e);
     }
 
     // Exit 0 does not mean the rebase is over: git also exits 0 when it stops

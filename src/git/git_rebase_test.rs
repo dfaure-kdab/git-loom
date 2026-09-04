@@ -70,6 +70,22 @@ fn continue_rebase_reports_paused_at_next_edit() {
     assert!(!super::rebase_is_in_progress(&git_dir));
 }
 
+/// `git rebase --continue` with no rebase in progress is a caller bug, not a
+/// conflict: reporting `Stopped` would send the user off to resolve conflicts
+/// that do not exist.
+#[test]
+fn continue_rebase_without_a_rebase_is_an_error() {
+    let test_repo = TestRepo::new();
+    test_repo.commit("first", "a.txt");
+    let workdir = test_repo.workdir();
+
+    let err = super::continue_rebase(&workdir).unwrap_err();
+    assert!(
+        err.to_string().contains("git rebase failed"),
+        "expected the rebase failure itself, got: {err}"
+    );
+}
+
 /// A command can fail before its rebase ever starts — the worktree check, the
 /// git-dir lookup, a missing loom binary. There is nothing to abort then, so
 /// the cleanup must still run: skipping it strands the temp branch, saved
@@ -190,7 +206,10 @@ fn rerere_resolved_stop_is_still_a_conflict() {
     conflict_on("topic1");
     test_repo.write_file("f.txt", "resolved\n");
     crate::git::run_git(&workdir, &["add", "f.txt"]).unwrap();
-    crate::git::run_git(&workdir, &["rebase", "--continue"]).unwrap();
+    assert_eq!(
+        super::continue_rebase(&workdir).unwrap(),
+        super::RebaseOutcome::Completed
+    );
 
     conflict_on("topic2");
 

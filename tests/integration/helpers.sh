@@ -22,6 +22,11 @@ if [[ ! -x "$GL_BIN" ]]; then
     exit 1
 fi
 
+# loom must suppress the editor itself (`git merge --continue` is a
+# `git commit` with no `--no-edit`), so an editor that leaks through fails
+# the test instead of hanging it. The env var beats any core.editor.
+export GIT_EDITOR=false
+
 # ── Colors ────────────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
     RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
@@ -92,9 +97,6 @@ setup_repo_with_remote() {
     git -C "$WORK" config user.email "test@test.com"
     git -C "$WORK" config user.name "Test"
     git -C "$WORK" config core.autocrlf false
-    # Prevent git from opening an interactive editor in tests (e.g. for
-    # `git merge --continue` which is equivalent to `git commit`).
-    git -C "$WORK" config core.editor "true"
 
     # Integration branch tracking origin/<default>
     git -C "$WORK" checkout -q -b integration
