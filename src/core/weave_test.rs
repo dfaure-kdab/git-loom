@@ -544,8 +544,11 @@ fn fixup_commit_to_missing_target_errors() {
     let result = graph.fixup_commit(oid(OID_FIX), oid(OID_C2));
     assert!(result.is_err());
     assert!(
-        result.unwrap_err().to_string().contains("not found"),
-        "should mention target not found"
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("not in the weave graph"),
+        "should say the target is not one loom can rewrite"
     );
 
     // Both commits should still be in the graph (not lost)

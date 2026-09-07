@@ -108,6 +108,14 @@ pub fn reset_mixed(workdir: &Path, target: &str) -> Result<()> {
     super::run_git(workdir, &["reset", target])
 }
 
+/// Soft reset to a target ref (uncommit, keeping the content staged).
+///
+/// Wraps `git reset --soft <target>`. Undoing a commit loom made itself: what
+/// that commit held goes back to the index exactly as it was staged.
+pub fn reset_soft(workdir: &Path, target: &str) -> Result<()> {
+    super::run_git(workdir, &["reset", "--soft", target])
+}
+
 /// Hard reset to a target ref (discard all changes).
 ///
 /// Wraps `git reset --hard <target>`. Moves HEAD and discards all working
