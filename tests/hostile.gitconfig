@@ -1,0 +1,103 @@
+# A user gitconfig built to break scripts that shell out to git.
+#
+# CI runs the whole test suite with `GIT_CONFIG_GLOBAL` pointing here, so every
+# git-loom invocation meets settings real users have: output shaped differently,
+# rebase and commit behavior altered, the editor refusing to run. Nothing here
+# is exotic — each key is one someone sets on purpose.
+#
+# Add a key whenever a config setting breaks git-loom, so the fix stays fixed.
+#
+# Deliberately absent: `feature.experimental`. It makes `git init` pick the
+# reftable backend, and libgit2 cannot open such a repository at all
+# ("unsupported extension name extensions.refstorage"), so every test would fail
+# for a reason that has nothing to do with config shape.
+
+[user]
+	name = Hostile Config
+	email = hostile@example.com
+
+[core]
+	# Neither may ever be invoked: every git-loom command that commits has to
+	# suppress the editor itself.
+	editor = false
+	# Renaming the comment character changes the rebase todo git writes and
+	# reads back.
+	commentChar = ";"
+	hooksPath = /nonexistent/hooks
+	autocrlf = input
+	fsmonitor = false
+
+[sequence]
+	editor = false
+
+[commit]
+	# Feeds the full diff into the commit message buffer, and to any
+	# `commit-msg` hook reading it.
+	verbose = true
+
+[color]
+	# Escape codes in every git output, tty or not. `color.diff` is set on its
+	# own because it beats `color.ui`: forcing the latter off is not enough.
+	ui = always
+	diff = always
+
+[diff]
+	# These four drop or rename the `a/`…`b/` prefixes every patch parser
+	# expects.
+	noprefix = true
+	mnemonicPrefix = true
+	srcPrefix = ""
+	dstPrefix = ""
+	# Replaces the patch with whatever a user's diff tool prints.
+	external = "/bin/echo"
+	# Reorders and annotates hunks.
+	colorMoved = default
+	algorithm = histogram
+	# Zero-context hunks: `git apply` refuses them without `--unidiff-zero`.
+	context = 0
+
+[apply]
+	# Rejects any patch that adds trailing whitespace.
+	whitespace = error
+
+[merge]
+	# Three-way conflict markers: an extra `|||||||` section in every
+	# conflicted file.
+	conflictStyle = zdiff3
+
+[rebase]
+	autoSquash = true
+	autoStash = true
+	updateRefs = true
+	missingCommitsCheck = error
+
+[pull]
+	rebase = true
+
+[rerere]
+	enabled = true
+	autoUpdate = true
+
+[status]
+	short = true
+	branch = true
+
+[log]
+	date = relative
+	abbrevCommit = true
+
+[init]
+	defaultBranch = trunk
+
+[push]
+	default = current
+
+[fetch]
+	prune = true
+
+[advice]
+	detachedHead = true
+	skippedCherryPicks = true
+
+[gc]
+	auto = 0
