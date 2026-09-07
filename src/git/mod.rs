@@ -21,7 +21,8 @@ pub use git_commit::{
 pub use git_diff::{
     diff_cached_file, diff_cached_file_is_binary, diff_cached_files, diff_commit, diff_commit_file,
     diff_commit_file_is_binary, diff_commit_name_status, diff_file, diff_file_is_binary, diff_head,
-    diff_head_file, diff_head_file_is_binary, diff_head_files, diff_head_name_only,
+    diff_head_display, diff_head_file, diff_head_file_display, diff_head_file_is_binary,
+    diff_head_files, diff_head_name_only, diff_range, show_commit_file, show_commit_patch,
 };
 pub use git_merge::{MergeOutcome, continue_merge, merge_abort, merge_is_in_progress, merge_no_ff};
 #[cfg(test)]
@@ -41,14 +42,49 @@ use anyhow::{Context, Result, bail};
 
 use crate::trace as loom_trace;
 
-/// Config forced on every git command loom runs itself.
+/// Config forced on every git command loom drives itself and reads back or
+/// feeds patches to: [`run_git`] and friends, `git apply`, and the rebases.
 ///
-/// With `commit.verbose` set, git appends the diff to `COMMIT_EDITMSG`. Where
-/// loom drives the commit no editor opens to strip it back out, so a
-/// `commit-msg` hook reads the whole diff as if it were the message. The
-/// display path (`run_git_interactive`) is deliberately left out: a real editor
-/// opens there, and the user keeps the diff they configured.
-pub const NO_VERBOSE_COMMIT: [&str; 2] = ["-c", "commit.verbose=false"];
+/// A user's gitconfig shapes git's behavior and output, and loom parses that
+/// output, replays it as patches, and hands git todo lists to execute. Each key
+/// here is one a real gitconfig sets and loom cannot let vary. Left alone on
+/// purpose: `run_git_interactive` (what the user reads is theirs to configure),
+/// `git push` and `git check-ref-format` (no output loom parses).
+///
+/// - `commit.verbose`: git appends the diff to `COMMIT_EDITMSG`, and no editor
+///   opens here to strip it back out, so a `commit-msg` hook reads the whole
+///   diff as if it were the message.
+/// - the four `diff.*` prefix keys: they drop or rename the `a/`…`b/` prefixes,
+///   and `git apply` can no longer strip a leading path component from a patch
+///   loom saved.
+/// - `apply.whitespace=error` makes `git apply` reject a saved patch that adds
+///   trailing whitespace; `apply.ignoreWhitespace=change` applies it somewhere
+///   else.
+/// - `rebase.missingCommitsCheck`: loom builds todo lists that leave commits
+///   out on purpose (`drop`, moving a commit to another branch); git refuses
+///   its own todo under `error` and complains under `warn`.
+///
+/// Color is not handled here: `color.ui` is only the default for `color.diff`
+/// and friends, and an explicit `color.diff=always` beats it. The diff helpers
+/// pass `--no-color` instead (see `git_diff.rs`).
+pub const FORCED_CONFIG: &[&str] = &[
+    "-c",
+    "commit.verbose=false",
+    "-c",
+    "diff.noprefix=false",
+    "-c",
+    "diff.mnemonicPrefix=false",
+    "-c",
+    "diff.srcPrefix=a/",
+    "-c",
+    "diff.dstPrefix=b/",
+    "-c",
+    "apply.whitespace=nowarn",
+    "-c",
+    "apply.ignoreWhitespace=no",
+    "-c",
+    "rebase.missingCommitsCheck=ignore",
+];
 
 /// The usual reason an abort fails, wherever that is reported — rebase or merge.
 pub const ABORT_FAILED_CAUSE: &str =
@@ -73,7 +109,7 @@ fn run_git_captured(workdir: &Path, args: &[&str]) -> Result<std::process::Outpu
     let start = Instant::now();
     let output = Command::new("git")
         .current_dir(workdir)
-        .args(NO_VERBOSE_COMMIT)
+        .args(FORCED_CONFIG)
         .args(args)
         .output()?;
 

@@ -42,6 +42,7 @@ fn apply_patch_with_flags(workdir: &Path, patch: &str, flags: &[&str]) -> Result
     let start = Instant::now();
     let mut child = Command::new("git")
         .current_dir(workdir)
+        .args(super::FORCED_CONFIG)
         .args(&args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
