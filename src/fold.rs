@@ -845,6 +845,14 @@ fn fold_files_into_commit(
     let target_oid = git2::Oid::from_str(commit_hash)?;
     let is_head = head_oid == target_oid;
 
+    // Ask before touching anything: the path below commits a `fixup!` first,
+    // so a target the weave cannot rewrite would leave that commit behind and
+    // report failure. This graph is not the one that drives the rebase — that
+    // one has to be built again afterwards, to see the fixup commit.
+    if !is_head {
+        Weave::from_repo(repo)?.require_commit(target_oid)?;
+    }
+
     let file_refs: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
 
     // Save and unstage any pre-existing staged files not in our target list,
@@ -886,54 +894,43 @@ fn fold_files_into_commit(
             return Err(e);
         }
 
-        let fixup_hash = git::rev_parse(workdir, "HEAD")?;
-        let fixup_oid = git2::Oid::from_str(&fixup_hash)?;
-
-        // Re-open repo after creating the fixup commit (OIDs changed)
-        let repo2 = Repository::open(workdir)?;
-        let mut graph = Weave::from_repo(&repo2)?;
-        graph.fixup_commit(fixup_oid, target_oid)?;
-
-        // Track target commit through the rebase via a temp branch.
-        // The branch must exist before the rebase AND have an update-ref
-        // line in the todo so git keeps it in sync.
-        git::branch_force_create(workdir, TRACK_BRANCH, commit_hash)?;
-        graph.track_commit(target_oid, TRACK_BRANCH);
-
+        // From here the repository carries a commit the user never asked for,
+        // and their other staged files live only in `saved_staged`.
         let git_dir = repo.path().to_path_buf();
-        let fold_ctx = serde_json::to_value(FoldVariant::FilesIntoCommit {
-            original_commit_hash: commit_hash.to_string(),
-            files_count: files.len(),
-            saved_staged: saved_staged.clone(),
-        })?;
-        // saved_staged is stored in both rollback (for `loom abort`) and context
-        // (for `loom continue` → after_continue). Both paths are required.
-        let loom_state = LoomState {
-            command: COMMAND.to_string(),
-            rollback: Rollback {
-                saved_staged_patch: saved_staged.clone(),
-                delete_branches: vec![TRACK_BRANCH.to_string()],
-                ..Default::default()
-            },
-            context: fold_ctx,
-        };
-        transaction::save(&git_dir, &loom_state)?;
-
-        let todo = graph.to_todo();
-        match weave::run_rebase(workdir, Some(&graph.base_oid.to_string()), &todo)? {
-            RebaseOutcome::Completed => {
+        match squash_fixup_into_commit(
+            &git_dir,
+            workdir,
+            target_oid,
+            head_oid,
+            files,
+            &saved_staged,
+        ) {
+            // The rebase is over, so the finishing steps run outside the
+            // rollback: undoing a rewrite that succeeded would leave the
+            // integration branch behind its own feature branches.
+            Ok(FixupOutcome::Rebased) => {
                 transaction::delete(&git_dir)?;
                 git::restore_staged_patch(workdir, &saved_staged)?;
                 new_hash = git::rev_parse(workdir, TRACK_BRANCH)?;
                 let _ = git::branch_delete(workdir, TRACK_BRANCH);
             }
-            RebaseOutcome::Paused => {
-                transaction::warn_paused_at_edit(Some(COMMAND));
-                return Ok(());
-            }
-            RebaseOutcome::Stopped => {
-                transaction::warn_conflict_paused(workdir, COMMAND);
-                return Ok(());
+            // `loom continue` and `loom abort` own the rest, through the state
+            // file the rebase left behind.
+            Ok(FixupOutcome::Paused) => return Ok(()),
+            Err(e) => {
+                return Err(git::rebase_abort_then_cleanup(workdir, e, || {
+                    // Take the commit back first: the saved patch was made
+                    // against the HEAD below it.
+                    let _ = git::reset_soft(workdir, &head_oid.to_string());
+                    if !skip_staging {
+                        // The reset staged what loom staged itself; the user
+                        // had these files modified, not staged.
+                        let _ = git::unstage_files(workdir, &file_refs);
+                    }
+                    let _ = git::restore_staged_patch(workdir, &saved_staged);
+                    let _ = git::branch_delete(workdir, TRACK_BRANCH);
+                    let _ = transaction::delete(&git_dir);
+                }));
             }
         }
     }
@@ -946,6 +943,78 @@ fn fold_files_into_commit(
     ));
 
     Ok(())
+}
+
+/// How far [`squash_fixup_into_commit`] got.
+enum FixupOutcome {
+    /// The rebase finished and the caller can finish off.
+    Rebased,
+    /// The rebase paused or stopped, leaving the state file in charge.
+    Paused,
+}
+
+/// Squash the `fixup!` commit sitting on HEAD into `target_oid`.
+///
+/// Everything here happens before the rebase completes, so the caller can roll
+/// back any error — see [`fold_files_into_commit`]. Nothing that must survive a
+/// finished rebase belongs in here.
+fn squash_fixup_into_commit(
+    git_dir: &Path,
+    workdir: &Path,
+    target_oid: git2::Oid,
+    head_oid: git2::Oid,
+    files: &[String],
+    saved_staged: &str,
+) -> Result<FixupOutcome> {
+    let commit_hash = target_oid.to_string();
+    let fixup_hash = git::rev_parse(workdir, "HEAD")?;
+    let fixup_oid = git2::Oid::from_str(&fixup_hash)?;
+
+    // Re-open repo after creating the fixup commit (OIDs changed)
+    let repo2 = Repository::open(workdir)?;
+    let mut graph = Weave::from_repo(&repo2)?;
+    graph.fixup_commit(fixup_oid, target_oid)?;
+
+    // Track target commit through the rebase via a temp branch.
+    // The branch must exist before the rebase AND have an update-ref
+    // line in the todo so git keeps it in sync.
+    git::branch_force_create(workdir, TRACK_BRANCH, &commit_hash)?;
+    graph.track_commit(target_oid, TRACK_BRANCH);
+
+    let fold_ctx = serde_json::to_value(FoldVariant::FilesIntoCommit {
+        original_commit_hash: commit_hash,
+        files_count: files.len(),
+        saved_staged: saved_staged.to_string(),
+    })?;
+    // saved_staged is stored in both rollback (for `loom abort`) and context
+    // (for `loom continue` → after_continue). Both paths are required.
+    let loom_state = LoomState {
+        command: COMMAND.to_string(),
+        rollback: Rollback {
+            // `git rebase --abort` restores HEAD to the fixup commit, not past
+            // it, so the undo has to go one step further back. Mixed, so the
+            // folded change comes back as a working-tree change.
+            reset_mixed_to: head_oid.to_string(),
+            saved_staged_patch: saved_staged.to_string(),
+            delete_branches: vec![TRACK_BRANCH.to_string()],
+            ..Default::default()
+        },
+        context: fold_ctx,
+    };
+    transaction::save(git_dir, &loom_state)?;
+
+    let todo = graph.to_todo();
+    match weave::run_rebase(workdir, Some(&graph.base_oid.to_string()), &todo)? {
+        RebaseOutcome::Completed => Ok(FixupOutcome::Rebased),
+        RebaseOutcome::Paused => {
+            transaction::warn_paused_at_edit(Some(COMMAND));
+            Ok(FixupOutcome::Paused)
+        }
+        RebaseOutcome::Stopped => {
+            transaction::warn_conflict_paused(workdir, COMMAND);
+            Ok(FixupOutcome::Paused)
+        }
+    }
 }
 
 /// Fold a commit into another commit (Case 2: Commit + Commit → Fixup).

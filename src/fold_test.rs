@@ -1660,6 +1660,123 @@ fn fold_create_keeps_the_diff_out_of_the_merge_message() {
     );
 }
 
+/// A rebase that refuses to start — a branch it would move is checked out in
+/// another worktree — must leave nothing of the fold behind: no `fixup!`
+/// commit, no staging loom did itself, no temp branch, no state file.
+#[test]
+fn fold_rolls_back_when_the_rebase_refuses_to_start() {
+    let test_repo = TestRepo::new_with_remote();
+    let workdir = test_repo.workdir();
+    let base = test_repo
+        .find_remote_branch_target("origin/main")
+        .to_string();
+
+    test_repo.create_branch_at("feature", &base);
+    test_repo.switch_branch("feature");
+    let a_oid = test_repo.commit("A1", "a1.txt");
+    test_repo.switch_branch("integration");
+    test_repo.merge_no_ff("feature");
+
+    // Holding `feature` in a second worktree is what makes the rebase refuse,
+    // and it refuses before starting: the rollback is all there is.
+    let wt = workdir.parent().unwrap().join("wt");
+    crate::git::run_git(
+        &workdir,
+        &["worktree", "add", wt.to_str().unwrap(), "feature"],
+    )
+    .unwrap();
+
+    let head_before = test_repo.head_oid();
+    test_repo.write_file("a1.txt", "the change to fold\n");
+    test_repo.write_file("other.txt", "staged by the user\n");
+    test_repo.stage_files(&["other.txt"]);
+
+    let result = super::fold_files_into_commit(
+        &test_repo.repo,
+        &["a1.txt".to_string()],
+        &a_oid.to_string(),
+        false,
+    );
+
+    assert!(
+        result.is_err(),
+        "the rebase cannot start, so the fold fails"
+    );
+    assert_eq!(
+        test_repo.head_oid(),
+        head_before,
+        "the `fixup!` commit must be gone"
+    );
+    let status = test_repo.status_porcelain();
+    assert!(
+        status.contains(" M a1.txt"),
+        "the folded file goes back to modified-but-unstaged, got: {:?}",
+        status
+    );
+    let staged = crate::core::repo::get_staged_files(&test_repo.repo).unwrap();
+    assert_eq!(
+        staged,
+        vec!["other.txt".to_string()],
+        "only the user's own staged file may be left staged"
+    );
+    assert!(
+        test_repo
+            .repo
+            .find_branch(super::TRACK_BRANCH, git2::BranchType::Local)
+            .is_err(),
+        "the temp branch must not survive"
+    );
+    assert!(
+        !test_repo
+            .repo
+            .path()
+            .join("loom")
+            .join("state.json")
+            .exists(),
+        "no state file may be left behind"
+    );
+}
+
+/// A target the weave cannot rewrite has to be refused before anything is
+/// committed. The fixup path commits first and builds the graph second, so a
+/// late refusal left that commit on HEAD and dropped the staging of every other
+/// file the user had staged.
+#[test]
+fn fold_into_an_out_of_scope_commit_leaves_the_repo_alone() {
+    let test_repo = TestRepo::new_with_remote();
+    // Upstream's own commit: below the weave's base, so not a commit loom can
+    // rewrite.
+    let out_of_scope = test_repo.find_remote_branch_target("origin/main");
+
+    test_repo.commit("L0", "other.txt");
+    test_repo.commit("L1", "l1.txt");
+    let head_before = test_repo.head_oid();
+
+    test_repo.write_file("l1.txt", "the change to fold\n");
+    test_repo.write_file("other.txt", "staged by the user\n");
+    test_repo.stage_files(&["other.txt"]);
+
+    let result = super::fold_files_into_commit(
+        &test_repo.repo,
+        &["l1.txt".to_string()],
+        &out_of_scope.to_string(),
+        false,
+    );
+
+    assert!(result.is_err(), "an out-of-scope target must be refused");
+    assert_eq!(
+        test_repo.head_oid(),
+        head_before,
+        "a refused fold must leave no commit behind"
+    );
+    let staged = crate::core::repo::get_staged_files(&test_repo.repo).unwrap();
+    assert!(
+        staged.contains(&"other.txt".to_string()),
+        "the user's own staged file must still be staged, got: {:?}",
+        staged
+    );
+}
+
 #[test]
 fn fold_create_warns_and_moves_to_existing_branch() {
     // When --create is used but the branch already exists, warn and move the commit.
@@ -1807,6 +1924,8 @@ fn fold_abort_preserves_working_state() {
     test_repo.stage_files(&["shared.txt"]);
     test_repo.commit_staged("Commit B");
 
+    let head_before = test_repo.head_oid();
+
     // Write the content we want to fold into A.
     // When B is replayed after modified-A it expects "version-a" → conflict.
     test_repo.write_file("shared.txt", "version-folded");
@@ -1839,6 +1958,18 @@ fn fold_abort_preserves_working_state() {
     let git_dir = test_repo.repo.path().to_path_buf();
     crate::core::transaction::abort_cmd(&workdir, &git_dir).unwrap();
 
+    // `git rebase --abort` restores HEAD to the `fixup!` commit fold made
+    // before the rebase, so the rollback has to reach one step further back.
+    assert_eq!(
+        test_repo.head_oid(),
+        head_before,
+        "abort must leave no `fixup!` commit behind"
+    );
+    assert_eq!(
+        test_repo.read_file("shared.txt"),
+        "version-folded",
+        "the change being folded comes back to the working tree"
+    );
     assert_eq!(test_repo.read_file("other-staged.txt"), "staged-content");
     assert_eq!(
         test_repo.read_file("other-unstaged.txt"),

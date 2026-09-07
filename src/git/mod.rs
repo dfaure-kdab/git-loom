@@ -16,7 +16,7 @@ pub use git_branch::{
 };
 pub use git_commit::{
     commit, commit_amend, commit_amend_no_edit, commit_with_editor, reset_hard, reset_mixed,
-    stage_all, stage_files, stage_path,
+    reset_soft, stage_all, stage_files, stage_path,
 };
 pub use git_diff::{
     diff_cached_file, diff_cached_file_is_binary, diff_cached_files, diff_commit, diff_commit_file,

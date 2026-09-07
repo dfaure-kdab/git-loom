@@ -236,6 +236,14 @@ fn apply_plan(repo: &Repository, workdir: &Path, git_dir: &Path, plan: AbsorbPla
     // Snapshot full working-tree diff before any mutations (needed for pre-rebase rollback).
     let saved_worktree = git::diff_head(workdir)?;
 
+    // Refuse an unrewritable target before committing anything: the graph is
+    // rebuilt after the fixup commits exist, and bailing there would strand
+    // them along with the saved patches.
+    let pre_graph = Weave::from_repo(repo)?;
+    for target in groups.keys().chain(hunk_groups.keys()) {
+        pre_graph.require_commit(*target)?;
+    }
+
     // Create fixup commits; rolls back to pre-mutation state on any failure.
     let fixup_pairs = create_fixup_commits(
         repo,

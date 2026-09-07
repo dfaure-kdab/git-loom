@@ -563,23 +563,37 @@ impl Weave {
         Ok(())
     }
 
+    /// Whether the weave holds `oid` as a commit it can rewrite.
+    pub fn contains_commit(&self, oid: Oid) -> bool {
+        self.branch_sections
+            .iter()
+            .any(|s| s.commits.iter().any(|c| c.oid == oid))
+            || self
+                .integration_line
+                .iter()
+                .any(|entry| matches!(entry, IntegrationEntry::Pick(c) if c.oid == oid))
+    }
+
+    /// Error out unless the weave can rewrite `oid`.
+    ///
+    /// A caller that changes the repository before it rebases — `fold` commits
+    /// a `fixup!` first — must ask this before touching anything, or a target
+    /// the weave rejects leaves that change behind.
+    pub fn require_commit(&self, oid: Oid) -> anyhow::Result<()> {
+        if self.contains_commit(oid) {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "Commit {} is not one loom can rewrite — it is not in the weave \
+             graph, so it sits on the upstream side of the integration base",
+            crate::git::short_hash(&oid.to_string())
+        )
+    }
+
     /// Change the source commit to Fixup and move it right after the target.
     pub fn fixup_commit(&mut self, source_oid: Oid, target_oid: Oid) -> anyhow::Result<()> {
         // Validate target exists BEFORE removing the source
-        let target_in_sections = self
-            .branch_sections
-            .iter()
-            .any(|s| s.commits.iter().any(|c| c.oid == target_oid));
-        let target_in_integration = self
-            .integration_line
-            .iter()
-            .any(|entry| matches!(entry, IntegrationEntry::Pick(c) if c.oid == target_oid));
-        if !target_in_sections && !target_in_integration {
-            anyhow::bail!(
-                "Cannot fixup commit: target commit {} not found in weave graph",
-                target_oid
-            );
-        }
+        self.require_commit(target_oid)?;
 
         let commit = self.remove_commit(source_oid);
         let Some(mut commit) = commit else {
