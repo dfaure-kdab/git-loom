@@ -37,7 +37,7 @@ pub fn continue_rebase(workdir: &Path) -> Result<RebaseOutcome> {
     let start = Instant::now();
     let output = Command::new("git")
         .current_dir(workdir)
-        .args(super::NO_VERBOSE_COMMIT)
+        .args(super::FORCED_CONFIG)
         .args(["rebase", "--continue"])
         .env("GIT_EDITOR", "true")
         .output()?;

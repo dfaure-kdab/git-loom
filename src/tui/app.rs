@@ -860,7 +860,7 @@ fn diff_text(snapshot: &Snapshot, row: &Row) -> String {
             if *count == 0 {
                 return "no changes".to_string();
             }
-            git::run_git_stdout(workdir, &["diff", "HEAD"])
+            git::diff_head_display(workdir)
         }
         RowKind::WorkingFile {
             path,
@@ -870,19 +870,16 @@ fn diff_text(snapshot: &Snapshot, row: &Row) -> String {
             if *index == '?' && *worktree == '?' {
                 return untracked_file_text(workdir, path);
             }
-            git::run_git_stdout(workdir, &["diff", "HEAD", "--", path])
+            git::diff_head_file_display(workdir, path)
         }
         RowKind::BranchName { range, .. } => match range {
-            Some((base, tip)) => git::run_git_stdout(workdir, &["diff", base, tip]),
+            Some((base, tip)) => git::diff_range(workdir, base, tip),
             None => return "branch has no commits of its own".to_string(),
         },
-        RowKind::Commit { oid, .. } => {
-            git::run_git_stdout(workdir, &["show", "--stat", "--patch", &oid.to_string()])
+        RowKind::Commit { oid, .. } => git::show_commit_patch(workdir, &oid.to_string()),
+        RowKind::CommitFile { oid, path, .. } => {
+            git::show_commit_file(workdir, &oid.to_string(), path)
         }
-        RowKind::CommitFile { oid, path, .. } => git::run_git_stdout(
-            workdir,
-            &["show", "--format=", &oid.to_string(), "--", path],
-        ),
         RowKind::Upstream {
             label,
             base_short_id,
@@ -894,9 +891,7 @@ fn diff_text(snapshot: &Snapshot, row: &Row) -> String {
                 label, base_short_id, base_message, commits_ahead
             );
         }
-        RowKind::Context { short_hash, .. } => {
-            git::run_git_stdout(workdir, &["show", "--stat", "--patch", short_hash])
-        }
+        RowKind::Context { short_hash, .. } => git::show_commit_patch(workdir, short_hash),
         RowKind::Spacer(_) => return String::new(),
     };
     match result {
