@@ -683,7 +683,7 @@ fn parse_cli(args: &[OsString]) -> Cli {
 fn colors_enabled(no_color: bool) -> bool {
     !no_color
         && std::env::var_os("NO_COLOR").is_none()
-        && !std::env::var_os("TERM").is_some_and(|v| v == "dumb")
+        && std::env::var_os("TERM").is_none_or(|v| v != "dumb")
         && std::io::stdout().is_terminal()
 }
 
