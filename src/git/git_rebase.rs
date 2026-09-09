@@ -27,48 +27,42 @@ pub fn continue_rebase(workdir: &Path) -> Result<RebaseOutcome> {
     // file for a step that is done.
     let git_dir = super::absolute_git_dir(workdir)?;
 
-    if let Err(e) = super::run_git(workdir, &["rebase", "--continue"]) {
-        if rebase_is_in_progress(&git_dir) {
-            return Ok(RebaseOutcome::Stopped);
-        }
-        return Err(e);
-    }
-
-    // Exit 0 does not mean the rebase is over: git also exits 0 when it stops
-    // at an `edit` or `break` step.
-    if rebase_is_in_progress(&git_dir) {
-        return Ok(RebaseOutcome::Paused);
-    }
-
-    Ok(RebaseOutcome::Completed)
+    rebase_outcome(&git_dir, super::run_git(workdir, &["rebase", "--continue"]))
 }
 
-/// Run a plain `git rebase` with the given extra args.
+/// Classify how a `git rebase …` command ended, from whether it succeeded and
+/// whether git left its state behind (`rebase-merge/` or `rebase-apply/`).
 ///
-/// Returns `RebaseOutcome::Completed` on success, or
-/// `RebaseOutcome::Stopped` if git left its state behind (detected by the
-/// presence of `rebase-merge/` or `rebase-apply/`), whatever stopped it.
-/// Any other failure (e.g., bad args) is returned as `Err`.
-pub fn rebase(git_dir: &Path, workdir: &Path, upstream: &str) -> Result<RebaseOutcome> {
-    match super::run_git(
-        workdir,
-        &[
-            "rebase",
-            "--autostash",
-            "--update-refs",
-            "--rebase-merges",
-            upstream,
-        ],
-    ) {
+/// Exit 0 does not mean the rebase is over: git also exits 0 when it stops at
+/// an `edit` or `break` step (`Paused`). A failure that left state behind is
+/// `Stopped`, whatever stopped it; any other failure (bad args, missing ref)
+/// is returned as `Err`.
+pub fn rebase_outcome(git_dir: &Path, result: Result<()>) -> Result<RebaseOutcome> {
+    let in_progress = rebase_is_in_progress(git_dir);
+    match result {
+        Ok(()) if in_progress => Ok(RebaseOutcome::Paused),
         Ok(()) => Ok(RebaseOutcome::Completed),
-        Err(e) => {
-            if rebase_is_in_progress(git_dir) {
-                Ok(RebaseOutcome::Stopped)
-            } else {
-                Err(e)
-            }
-        }
+        Err(_) if in_progress => Ok(RebaseOutcome::Stopped),
+        Err(e) => Err(e),
     }
+}
+
+/// Run a plain `git rebase` onto `upstream`; see [`rebase_outcome`] for the
+/// result.
+pub fn rebase(git_dir: &Path, workdir: &Path, upstream: &str) -> Result<RebaseOutcome> {
+    rebase_outcome(
+        git_dir,
+        super::run_git(
+            workdir,
+            &[
+                "rebase",
+                "--autostash",
+                "--update-refs",
+                "--rebase-merges",
+                upstream,
+            ],
+        ),
+    )
 }
 
 /// Rebase commits between `upstream` and HEAD onto `newbase`.
