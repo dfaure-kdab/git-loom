@@ -27,6 +27,13 @@ pub fn head_oid(repo: &Repository) -> Result<git2::Oid> {
     repo.head()?.target().context("HEAD has no target")
 }
 
+/// Whether `oid` is `tip` itself or one of its ancestors.
+///
+/// `graph_descendant_of` alone is strict: a commit is not its own descendant.
+pub fn contains(repo: &Repository, tip: git2::Oid, oid: git2::Oid) -> Result<bool> {
+    Ok(tip == oid || repo.graph_descendant_of(tip, oid)?)
+}
+
 /// Return the subject line (first line) of a commit message.
 pub fn commit_subject(commit: &git2::Commit) -> String {
     commit.summary().ok().flatten().unwrap_or("").to_string()
@@ -121,7 +128,7 @@ pub fn hide_branch_pattern(repo: &Repository) -> Option<String> {
 }
 
 /// Read git config `loom.pruneGoneBranches`. When `true`, `loom update`
-/// removes local branches whose upstream was pruned without prompting.
+/// removes fully merged and gone-upstream local branches without prompting.
 /// Returns `false` if the key is unset or not a boolean.
 pub fn prune_gone_branches(repo: &Repository) -> bool {
     repo.config()

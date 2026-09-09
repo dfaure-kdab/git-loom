@@ -187,19 +187,31 @@ fn drop_commit(repo: &Repository, commit_hash: &str, skip_confirm: bool) -> Resu
     }
 
     let short_hash = git::short_hash(commit_hash);
+    let mut graph = Weave::from_repo_with_info(repo, &info)?;
+    let Some(emptied) = graph.drop_commit(commit_oid) else {
+        bail!(
+            "Cannot drop commit: {} not found in weave graph",
+            short_hash
+        );
+    };
+    // Several branches at the same sole commit own nothing, so none of them
+    // was routed to drop_branch_with_info above. Their refs would be left
+    // outside the integration history.
+    if !emptied.is_empty() {
+        bail!(
+            "Cannot drop commit `{}`: it is the only commit of {}\n\
+             Run `git branch -D {}` first, then drop again",
+            short_hash,
+            weave::describe_branches(&emptied),
+            emptied.join(" ")
+        );
+    }
+
     let summary = repo::commit_subject(&repo.find_commit(commit_oid)?);
     confirm_or_bail(
         skip_confirm,
         &format!("Drop commit `{}` {}?", short_hash, summary),
     )?;
-
-    let mut graph = Weave::from_repo_with_info(repo, &info)?;
-    if !graph.drop_commit(commit_oid) {
-        bail!(
-            "Cannot drop commit: {} not found in weave graph",
-            short_hash
-        );
-    }
 
     let ctx = DropContext {
         commit_hash: commit_hash.to_string(),
@@ -348,7 +360,7 @@ fn drop_branch_with_info(
     } else {
         // Non-woven branch: drop each uniquely owned commit individually
         for oid in &owned {
-            if !graph.drop_commit(*oid) {
+            if graph.drop_commit(*oid).is_none() {
                 bail!(
                     "Cannot drop branch: commit {} not found in weave graph",
                     oid

@@ -429,6 +429,44 @@ fn drop_stacked_outer_branch_preserves_inner_branch() {
     );
 }
 
+/// Two branches at the same sole commit inside an outer branch own nothing,
+/// so `drop <commit>` is not routed to drop_branch. It must still refuse:
+/// the refs would be left outside the integration history.
+#[test]
+fn drop_sole_commit_shared_by_two_branches_is_refused() {
+    let test_repo = TestRepo::new_with_remote();
+    let base_oid = test_repo.find_remote_branch_target("origin/main");
+
+    test_repo.create_branch_at("inner", &base_oid.to_string());
+    test_repo.switch_branch("inner");
+    let i1_oid = test_repo.commit("I1", "i1.txt");
+    test_repo.create_branch_at("inner-too", &i1_oid.to_string());
+
+    test_repo.create_branch_at("outer", &i1_oid.to_string());
+    test_repo.switch_branch("outer");
+    test_repo.commit("O1", "o1.txt");
+
+    test_repo.switch_branch("integration");
+    test_repo.merge_no_ff("outer");
+    let head_before = test_repo.head_oid();
+
+    let err = super::drop_commit(&test_repo.repo, &i1_oid.to_string(), true)
+        .expect_err("dropping the sole commit of two branches must be refused");
+    assert!(
+        err.to_string()
+            .contains("only commit of branches `inner`, `inner-too`"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(
+        test_repo.head_oid(),
+        head_before,
+        "history must be untouched"
+    );
+    for name in ["inner", "inner-too"] {
+        assert_eq!(test_repo.get_branch_target(name), i1_oid);
+    }
+}
+
 #[test]
 fn drop_stacked_inner_branch_is_refused() {
     // Same topology as above: feat2 is stacked on feat1.

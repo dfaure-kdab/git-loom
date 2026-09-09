@@ -218,6 +218,13 @@ working directory as unstaged modifications. The target is specified using
 - **Non-HEAD commit**: Captures the commit's diff, drops the commit from
   history via Weave rebase, then applies the diff to the working directory.
 - Uncommitted changes in other files are preserved automatically.
+- **Only commit of a branch** (non-HEAD): refused, for an inner (stacked)
+  branch and for a branch with its own section alike. The branch ref would
+  otherwise be left on a commit outside the integration history, where loom
+  no longer sees it.
+  Error: `"Cannot uncommit `<id>`: it is the only commit of branch `<name>`"`,
+  with a hint to run `git branch -D <name>` first and uncommit again. Several branches
+  at that commit are all named.
 
 **What changes:**
 

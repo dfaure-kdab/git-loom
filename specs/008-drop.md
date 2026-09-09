@@ -55,6 +55,12 @@ owned by a branch, the operation automatically drops the entire branch instead.
 This ensures the merge topology is properly cleaned up and the branch ref is
 deleted, rather than leaving an empty branch section.
 
+Several branches at the same sole commit own nothing, so this does not apply
+to them: dropping the commit is refused, since their refs would be left on a
+commit outside the integration history. Error: `"Cannot drop commit `<id>`: it
+is the only commit of branches `<a>`, `<b>`"`, with a hint to run
+`git branch -D <a> <b>` first and drop again.
+
 **What changes:**
 
 - Target commit is removed from history
