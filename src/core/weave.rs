@@ -1369,29 +1369,16 @@ pub fn run_rebase(
 
     loom_trace::annotate("generated todo", todo_content);
 
-    if !output.status.success() {
-        // Clean up the temp file — don't abort the rebase here; callers
-        // decide whether to abort (out-of-scope) or pause (resumable).
-        let _ = temp_path.close();
-        // Distinguish a rebase that stopped part-way (git left its state on
-        // disk) from a generic failure (bad todo, missing ref, sequence-editor
-        // error). The plain `git rebase` wrapper uses the same check.
-        if git::rebase_is_in_progress(&git_dir) {
-            return Ok(RebaseOutcome::Stopped);
-        }
-        anyhow::bail!("git rebase failed");
-    }
-
-    // Clean up the temp file
+    // Clean up the temp file. Don't abort the rebase here; callers decide
+    // whether to abort (out-of-scope) or pause (resumable).
     let _ = temp_path.close();
 
-    // Exit 0 does not mean the rebase is over: git also exits 0 when the todo
-    // stops it at an `edit` step.
-    if git::rebase_is_in_progress(&git_dir) {
-        return Ok(RebaseOutcome::Paused);
-    }
-
-    Ok(RebaseOutcome::Completed)
+    let result = if output.status.success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("git rebase failed"))
+    };
+    git::rebase_outcome(&git_dir, result)
 }
 
 /// Branches this rebase will move: every `update-ref refs/heads/<name>` line in

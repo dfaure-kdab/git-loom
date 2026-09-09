@@ -321,3 +321,27 @@ fn untracked_file_stop_is_not_a_conflict() {
         "an untracked file in the way is not a conflict"
     );
 }
+
+#[test]
+fn rebase_outcome_classifies_all_four_cases() {
+    use super::{RebaseOutcome, rebase_outcome};
+    let tmp = tempfile::tempdir().unwrap();
+    let git_dir = tmp.path();
+    let fail = || Err(anyhow::anyhow!("boom"));
+
+    assert_eq!(
+        rebase_outcome(git_dir, Ok(())).unwrap(),
+        RebaseOutcome::Completed
+    );
+    assert!(rebase_outcome(git_dir, fail()).is_err());
+
+    std::fs::create_dir(git_dir.join("rebase-merge")).unwrap();
+    assert_eq!(
+        rebase_outcome(git_dir, Ok(())).unwrap(),
+        RebaseOutcome::Paused
+    );
+    assert_eq!(
+        rebase_outcome(git_dir, fail()).unwrap(),
+        RebaseOutcome::Stopped
+    );
+}
