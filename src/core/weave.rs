@@ -288,6 +288,10 @@ impl Weave {
     /// Remove branch-section commits that are already in the new upstream
     /// (merged or cherry-picked). Empty sections and their merges are removed.
     ///
+    /// Returns the branches that lost all their commits (a removed section,
+    /// or an inner branch): they disappear from the todo, so the rebase leaves
+    /// their refs untouched.
+    ///
     /// Uses two strategies:
     /// 1. Exact OID ancestry (commit was directly merged)
     /// 2. `git cherry` for cherry-pick detection (only when candidates remain)
@@ -296,18 +300,16 @@ impl Weave {
         repo: &Repository,
         workdir: &Path,
         new_upstream_oid: Oid,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         // Strategy 1: exact ancestor check (fast, no processes)
         let mut candidates: Vec<Oid> = Vec::new();
         let mut to_drop = Vec::new();
         for section in &self.branch_sections {
             for commit in &section.commits {
-                match repo.graph_descendant_of(new_upstream_oid, commit.oid) {
-                    Ok(true) => to_drop.push(commit.oid),
-                    Ok(false) => candidates.push(commit.oid),
-                    Err(e) => {
-                        return Err(e.into());
-                    }
+                if repo::contains(repo, new_upstream_oid, commit.oid)? {
+                    to_drop.push(commit.oid);
+                } else {
+                    candidates.push(commit.oid);
                 }
             }
         }
@@ -328,11 +330,14 @@ impl Weave {
             }
         }
 
+        let mut emptied = Vec::new();
         for oid in to_drop {
-            // Always found: the oids come from the sections themselves
-            let _ = self.drop_commit(oid);
+            emptied.extend(
+                self.drop_commit(oid)
+                    .expect("the oid comes from the sections themselves"),
+            );
         }
-        Ok(())
+        Ok(emptied)
     }
 
     /// Remove a commit from the graph.
@@ -340,9 +345,17 @@ impl Weave {
     /// If the commit is in a branch section and is the last commit, the section
     /// and its merge entry are also removed.
     ///
-    /// Returns false if the commit is not in the graph.
+    /// An inner branch ending at the removed commit now ends at the commit
+    /// before it. When the removed commit was the first of its section, the
+    /// inner branch has no commits left: its ref is dropped from the todo, so
+    /// the rebase leaves it untouched. Moving it onto the next commit would
+    /// give the branch a commit it never contained. The same goes for a loose
+    /// branch at a removed integration-line commit.
+    ///
+    /// Returns the branches left without a commit (the section's own when
+    /// the section is removed), or `None` if the commit is not in the graph.
     #[must_use]
-    pub fn drop_commit(&mut self, oid: Oid) -> bool {
+    pub fn drop_commit(&mut self, oid: Oid) -> Option<Vec<String>> {
         // Check branch sections first
         for i in 0..self.branch_sections.len() {
             if let Some(pos) = self.branch_sections[i]
@@ -352,48 +365,48 @@ impl Weave {
             {
                 let removed = self.branch_sections[i].commits.remove(pos);
 
-                // Transfer update_refs to an adjacent commit
-                if !removed.update_refs.is_empty() && !self.branch_sections[i].commits.is_empty() {
-                    let target_pos = if pos > 0 { pos - 1 } else { 0 };
-                    self.branch_sections[i].commits[target_pos]
+                let mut emptied = if pos > 0 {
+                    self.branch_sections[i].commits[pos - 1]
                         .update_refs
                         .extend(removed.update_refs);
-                }
+                    Vec::new()
+                } else {
+                    removed.update_refs
+                };
 
                 // If section is now empty, remove it and its merge
                 if self.branch_sections[i].commits.is_empty() {
-                    let label = self.branch_sections[i].label.clone();
-                    self.branch_sections.remove(i);
+                    let section = self.branch_sections.remove(i);
                     self.integration_line.retain(
-                        |e| !matches!(e, IntegrationEntry::Merge { label: l, .. } if *l == label),
+                        |e| !matches!(e, IntegrationEntry::Merge { label: l, .. } if *l == section.label),
                     );
+                    emptied.extend(section.branch_names);
                 }
-                return true;
+                return Some(emptied);
             }
         }
 
         // Check integration line
-        let Some(pos) = self
+        let pos = self
             .integration_line
             .iter()
-            .position(|e| matches!(e, IntegrationEntry::Pick(c) if c.oid == oid))
-        else {
-            return false;
-        };
+            .position(|e| matches!(e, IntegrationEntry::Pick(c) if c.oid == oid))?;
+        let mut emptied = Vec::new();
         if let IntegrationEntry::Pick(removed) = self.integration_line.remove(pos)
             && !removed.update_refs.is_empty()
         {
-            // Find the nearest adjacent Pick to transfer refs to
-            let target = (pos..self.integration_line.len())
-                .chain((0..pos).rev())
-                .find(|&j| matches!(self.integration_line[j], IntegrationEntry::Pick(_)));
+            // Move the refs back to the nearest earlier Pick
+            let target =
+                (0..pos).rfind(|&j| matches!(self.integration_line[j], IntegrationEntry::Pick(_)));
             if let Some(j) = target
                 && let IntegrationEntry::Pick(ref mut c) = self.integration_line[j]
             {
                 c.update_refs.extend(removed.update_refs);
+            } else {
+                emptied = removed.update_refs;
             }
         }
-        true
+        Some(emptied)
     }
 
     /// Whether a branch owns a section (matches a section's branch names or label).
@@ -940,6 +953,21 @@ fn flush_refs(out: &mut String, refs: &[String]) {
     }
 }
 
+/// `branch \`a\`` or `branches \`a\`, \`b\``, for messages about the
+/// branches `drop_commit` left without a commit.
+pub fn describe_branches(names: &[String]) -> String {
+    let list = names
+        .iter()
+        .map(|b| format!("`{b}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() == 1 {
+        format!("branch {list}")
+    } else {
+        format!("branches {list}")
+    }
+}
+
 /// An entry from the first-parent walk of the integration branch.
 #[derive(Debug)]
 struct FirstParentEntry {
@@ -966,10 +994,7 @@ struct FirstParentEntry {
 fn integration_base(repo: &Repository, head: Oid, upstream: Oid, merge_base: Oid) -> Result<Oid> {
     let mut current = head;
     loop {
-        if current == merge_base || current == upstream {
-            return Ok(current);
-        }
-        if repo.graph_descendant_of(upstream, current).unwrap_or(false) {
+        if current == merge_base || repo::contains(repo, upstream, current).unwrap_or(false) {
             return Ok(current);
         }
         let commit = repo.find_commit(current)?;

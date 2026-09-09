@@ -884,6 +884,52 @@ fn fold_commit_to_unstaged_dirty_autostashed() {
     assert_eq!(test_repo.read_file("file2.txt"), "Second commit");
 }
 
+/// Uncommitting the only commit of a woven branch would leave its ref on a
+/// commit outside the integration history. Refused for an inner (stacked)
+/// branch and for a branch with its own section alike; several branches at
+/// that commit are all named.
+#[test]
+fn fold_commit_to_unstaged_refuses_sole_commit_of_branch() {
+    let test_repo = TestRepo::new_with_remote();
+    let base_oid = test_repo.find_remote_branch_target("origin/main");
+
+    test_repo.create_branch_at("inner", &base_oid.to_string());
+    test_repo.switch_branch("inner");
+    let i1_oid = test_repo.commit("I1", "i1.txt");
+    test_repo.create_branch_at("inner-too", &i1_oid.to_string());
+
+    test_repo.create_branch_at("outer", &i1_oid.to_string());
+    test_repo.switch_branch("outer");
+    test_repo.commit("O1", "o1.txt");
+
+    test_repo.create_branch_at("solo", &base_oid.to_string());
+    test_repo.switch_branch("solo");
+    let s1_oid = test_repo.commit("S1", "s1.txt");
+
+    test_repo.switch_branch("integration");
+    test_repo.merge_no_ff("outer");
+    test_repo.merge_no_ff("solo");
+    let head_before = test_repo.head_oid();
+
+    for (oid, expected) in [
+        (i1_oid, "only commit of branches `inner`, `inner-too`"),
+        (s1_oid, "only commit of branch `solo`"),
+    ] {
+        let err = super::fold_commit_to_unstaged(&test_repo.repo, &oid.to_string())
+            .expect_err("uncommitting the only commit of a branch must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains(expected), "unexpected error: {msg}");
+        assert_eq!(
+            test_repo.head_oid(),
+            head_before,
+            "history must be untouched"
+        );
+    }
+    for (branch, oid) in [("inner", i1_oid), ("inner-too", i1_oid), ("solo", s1_oid)] {
+        assert_eq!(test_repo.get_branch_target(branch), oid);
+    }
+}
+
 #[test]
 fn classify_commit_into_unstaged() {
     let sources = vec![repo::Target::Commit("abc123".into())];

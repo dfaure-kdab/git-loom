@@ -17,6 +17,9 @@ struct UpdateContext {
     branch_name: String,
     upstream_name: String,
     skip_confirm: bool,
+    /// Branches whose every commit was already upstream before the rebase.
+    #[serde(default)]
+    merged_branches: Vec<String>,
 }
 
 /// Update the integration branch by fetching and rebasing from upstream.
@@ -98,11 +101,54 @@ pub fn run(skip_confirm: bool) -> Result<()> {
 
     fetch_push_remote(&repo, &workdir, &upstream_name);
 
+    // Re-open repo after fetch (remote refs changed)
+    let repo = git2::Repository::discover(&workdir)?;
+
+    // Rebase onto upstream using the weave model.
+    //
+    // Plain `git rebase --rebase-merges` preserves merge topology literally,
+    // which can place new upstream commits on the wrong side of merge commits
+    // (inside a feature branch instead of on the base line). The weave model
+    // generates a clean todo where every branch section `reset onto`, ensuring
+    // branches are correctly rebased onto the new upstream tip.
+    //
+    // No topology (e.g. a plain branch with no weave) means a plain rebase.
+    let (todo, merged_branches) = match Weave::from_repo(&repo) {
+        Ok(mut graph) => {
+            // Drop branch-section commits already in the new upstream
+            // (merged or cherry-picked). This prevents conflicts from
+            // replaying commits whose content is already in the base.
+            let new_upstream_oid = repo
+                .revparse_single(&upstream_name)
+                .context("Failed to resolve upstream ref")?
+                .id();
+            let filtered_out = graph.filter_upstream_commits(&repo, &workdir, new_upstream_oid)?;
+
+            // Fully merged branches: every commit was filtered out (merged
+            // or cherry-picked), or the tip sits below the merge base with
+            // the upstream. The weave only knows tips above the merge base,
+            // so ancestry has to find the latter.
+            let mut merged = find_branches_merged_upstream(
+                &repo,
+                &branch_name,
+                repo::head_oid(&repo)?,
+                graph.base_oid,
+                new_upstream_oid,
+            )?;
+            merged.extend(filtered_out);
+            merged.sort();
+            merged.dedup();
+            (Some(graph.to_todo()), merged)
+        }
+        Err(_) => (None, Vec::new()),
+    };
+
     // Save rollback state before the rebase
     let ctx = UpdateContext {
         branch_name: branch_name.clone(),
         upstream_name: upstream_name.clone(),
         skip_confirm,
+        merged_branches,
     };
     let state = LoomState {
         command: "update".to_string(),
@@ -113,37 +159,12 @@ pub fn run(skip_confirm: bool) -> Result<()> {
     };
     transaction::save(&git_dir, &state)?;
 
-    // Rebase onto upstream using the weave model.
-    //
-    // Plain `git rebase --rebase-merges` preserves merge topology literally,
-    // which can place new upstream commits on the wrong side of merge commits
-    // (inside a feature branch instead of on the base line). The weave model
-    // generates a clean todo where every branch section `reset onto`, ensuring
-    // branches are correctly rebased onto the new upstream tip.
     let spinner = msg::spinner();
     spinner.start("Rebasing onto upstream...");
 
-    // Re-open repo after fetch (remote refs changed)
-    let repo = git2::Repository::discover(&workdir)?;
-
-    let outcome = match Weave::from_repo(&repo) {
-        Ok(mut graph) => {
-            // Drop branch-section commits already in the new upstream
-            // (merged or cherry-picked). This prevents conflicts from
-            // replaying commits whose content is already in the base.
-            let new_upstream_oid = repo
-                .revparse_single(&upstream_name)
-                .context("Failed to resolve upstream ref")?
-                .id();
-            graph.filter_upstream_commits(&repo, &workdir, new_upstream_oid)?;
-            let todo = graph.to_todo();
-            crate::core::weave::run_rebase(&workdir, Some(&upstream_name), &todo)
-        }
-        Err(_) => {
-            // Fallback: no integration topology (e.g., plain branch with no weave).
-            // Use plain rebase.
-            git::rebase(&git_dir, &workdir, &upstream_name)
-        }
+    let outcome = match &todo {
+        Some(todo) => crate::core::weave::run_rebase(&workdir, Some(&upstream_name), todo),
+        None => git::rebase(&git_dir, &workdir, &upstream_name),
     };
 
     match outcome {
@@ -269,23 +290,21 @@ fn post_update(workdir: &Path, repo: &git2::Repository, ctx: &UpdateContext) -> 
         ctx.branch_name, ctx.upstream_name, upstream_info
     ));
 
-    // Propose removing local branches whose remote tracking branch was pruned
+    // Propose removing local branches that are fully merged upstream or
+    // whose remote tracking branch was pruned
     let gone = find_branches_with_gone_upstream(repo, &ctx.branch_name)?;
-    if !gone.is_empty() {
-        let mut warn_msg = format!(
-            "{} local {} with a gone upstream:",
-            gone.len(),
-            if gone.len() == 1 {
-                "branch"
-            } else {
-                "branches"
-            }
-        );
-        for name in &gone {
-            warn_msg.push('\n');
-            warn_msg.push_str(name);
-        }
-        msg::warn(&warn_msg);
+    // The merged list predates the rebase; a branch may be gone by now
+    // (deleted by hand during a conflict pause)
+    let merged: Vec<String> = ctx
+        .merged_branches
+        .iter()
+        .filter(|name| !gone.contains(name) && repo.find_branch(name, BranchType::Local).is_ok())
+        .cloned()
+        .collect();
+    let to_remove: Vec<&String> = merged.iter().chain(gone.iter()).collect();
+    if !to_remove.is_empty() {
+        warn_branch_list(&merged, "fully merged upstream");
+        warn_branch_list(&gone, "with a gone upstream");
         // Post-mutation prompt: the pull-rebase already succeeded, so agent
         // mode must not answer `needs_input` (that would imply nothing
         // happened) — skip the optional pruning instead and say how to redo it.
@@ -293,7 +312,7 @@ fn post_update(workdir: &Path, repo: &git2::Repository, ctx: &UpdateContext) -> 
             let confirmed = repo::prune_gone_branches(repo);
             if !confirmed {
                 msg::warn(
-                    "Skipped removing gone branches (agent mode)\n\
+                    "Skipped removing branches (agent mode)\n\
                      Re-run with `loom update -y` to remove them",
                 );
             }
@@ -302,7 +321,7 @@ fn post_update(workdir: &Path, repo: &git2::Repository, ctx: &UpdateContext) -> 
             ctx.skip_confirm
                 || repo::prune_gone_branches(repo)
                 || msg::confirm(
-                    if gone.len() == 1 {
+                    if to_remove.len() == 1 {
                         "Remove it?"
                     } else {
                         "Remove them?"
@@ -311,7 +330,7 @@ fn post_update(workdir: &Path, repo: &git2::Repository, ctx: &UpdateContext) -> 
                 )?
         };
         if confirmed {
-            for name in &gone {
+            for name in to_remove {
                 // Capture the tip before deletion so users can revive the branch.
                 let short_id = repo
                     .revparse_single(name)
@@ -326,9 +345,8 @@ fn post_update(workdir: &Path, repo: &git2::Repository, ctx: &UpdateContext) -> 
                     },
                     Err(_) => {
                         msg::warn(&format!(
-                            "Skipped branch `{}` — it has unmerged local commits.\n\
-                             Use `git branch -D {}` to force-delete.",
-                            name, name
+                            "Skipped branch `{}` — could not delete it (run `loom trace` for the git error)",
+                            name
                         ));
                     }
                 }
@@ -337,6 +355,62 @@ fn post_update(workdir: &Path, repo: &git2::Repository, ctx: &UpdateContext) -> 
     }
 
     Ok(())
+}
+
+/// Warn with the branch names listed one per line. Silent for an empty list.
+fn warn_branch_list(names: &[String], what: &str) {
+    if names.is_empty() {
+        return;
+    }
+    let mut warn_msg = format!(
+        "{} local {} {}:",
+        names.len(),
+        if names.len() == 1 {
+            "branch"
+        } else {
+            "branches"
+        },
+        what
+    );
+    for name in names {
+        warn_msg.push('\n');
+        warn_msg.push_str(name);
+    }
+    msg::warn(&warn_msg);
+}
+
+/// Find local branches woven into the integration branch whose tip the new
+/// upstream already contains.
+///
+/// Only branches reachable from `head_oid` and above `base_oid` (the
+/// integration base) count. Below that point lies upstream history, where a
+/// branch like a local `main` is not loom's to remove.
+fn find_branches_merged_upstream(
+    repo: &git2::Repository,
+    current_branch: &str,
+    head_oid: git2::Oid,
+    base_oid: git2::Oid,
+    upstream_oid: git2::Oid,
+) -> Result<Vec<String>> {
+    let contains = |tip, oid| repo::contains(repo, tip, oid);
+
+    let mut merged = Vec::new();
+    for branch_result in repo.branches(Some(BranchType::Local))? {
+        let (branch, _) = branch_result?;
+        let Some(name) = branch.name()? else {
+            continue;
+        };
+        if name == current_branch {
+            continue;
+        }
+        let Some(tip) = branch.get().target() else {
+            continue;
+        };
+        if !contains(base_oid, tip)? && contains(upstream_oid, tip)? && contains(head_oid, tip)? {
+            merged.push(name.to_string());
+        }
+    }
+    Ok(merged)
 }
 
 /// Find local branches whose configured upstream tracking ref no longer exists.

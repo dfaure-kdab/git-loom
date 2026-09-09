@@ -212,7 +212,7 @@ fn drop_commit_from_branch_section() {
         }],
     };
 
-    assert!(graph.drop_commit(oid(OID_A1)));
+    assert!(graph.drop_commit(oid(OID_A1)).is_some());
 
     assert_eq!(graph.branch_sections.len(), 1);
     assert_eq!(graph.branch_sections[0].commits.len(), 1);
@@ -239,7 +239,7 @@ fn drop_last_commit_removes_section_and_merge() {
         ],
     };
 
-    assert!(graph.drop_commit(oid(OID_A1)));
+    assert!(graph.drop_commit(oid(OID_A1)).is_some());
 
     assert!(graph.branch_sections.is_empty());
     assert_eq!(graph.integration_line.len(), 1); // Only "Int" pick remains
@@ -257,13 +257,13 @@ fn drop_commit_from_integration_line() {
         ],
     };
 
-    assert!(graph.drop_commit(oid(OID_C1)));
+    assert!(graph.drop_commit(oid(OID_C1)).is_some());
 
     assert_eq!(graph.integration_line.len(), 1);
 }
 
 #[test]
-fn drop_unknown_commit_or_branch_returns_false() {
+fn drop_unknown_commit_or_branch_is_refused() {
     let mut graph = Weave {
         base_oid: oid(BASE),
 
@@ -276,7 +276,7 @@ fn drop_unknown_commit_or_branch_returns_false() {
         integration_line: vec![IntegrationEntry::Pick(make_commit(OID_C1, "C1"))],
     };
 
-    assert!(!graph.drop_commit(oid("dead")));
+    assert!(graph.drop_commit(oid("dead")).is_none());
     assert!(!graph.drop_branch("no-such-branch"));
     assert!(!graph.reassign_branch("no-such-branch", "feature-a"));
 
@@ -800,7 +800,7 @@ fn drop_commit_transfers_update_refs_to_adjacent() {
         }],
     };
 
-    assert!(graph.drop_commit(oid("222")));
+    assert!(graph.drop_commit(oid("222")).is_some());
 
     // update_refs should transfer to adjacent commit (C1, preceding)
     assert_eq!(graph.branch_sections[0].commits.len(), 2);
@@ -813,7 +813,7 @@ fn drop_commit_transfers_update_refs_to_adjacent() {
 }
 
 #[test]
-fn drop_commit_transfers_update_refs_to_next_when_first() {
+fn drop_commit_drops_update_refs_when_first() {
     let mut graph = Weave {
         base_oid: oid("aaa"),
         branch_sections: vec![BranchSection {
@@ -831,14 +831,17 @@ fn drop_commit_transfers_update_refs_to_next_when_first() {
         }],
     };
 
-    assert!(graph.drop_commit(oid("111")));
+    assert_eq!(
+        graph.drop_commit(oid("111")),
+        Some(vec!["non-woven-branch".to_string()])
+    );
 
+    // The inner branch has no commits left: moving its ref onto C2 would
+    // give it a commit it never contained.
     assert_eq!(graph.branch_sections[0].commits.len(), 1);
     assert!(
-        graph.branch_sections[0].commits[0]
-            .update_refs
-            .contains(&"non-woven-branch".to_string()),
-        "update_refs should transfer to next commit when first is dropped"
+        graph.branch_sections[0].commits[0].update_refs.is_empty(),
+        "update_refs must not transfer to the next commit"
     );
 }
 
@@ -854,9 +857,9 @@ fn drop_commit_on_integration_line_transfers_update_refs() {
         ],
     };
 
-    assert!(graph.drop_commit(oid("222")));
+    assert_eq!(graph.drop_commit(oid("222")), Some(vec![]));
 
-    // Should transfer to an adjacent Pick on the integration line
+    // The ref moves back to C1, never forward to C3
     let picks: Vec<&CommitEntry> = graph
         .integration_line
         .iter()
@@ -869,12 +872,30 @@ fn drop_commit_on_integration_line_transfers_update_refs() {
         })
         .collect();
     assert_eq!(picks.len(), 2);
-    let has_ref = picks
-        .iter()
-        .any(|c| c.update_refs.contains(&"loose-branch".to_string()));
+    assert_eq!(picks[0].update_refs, vec!["loose-branch".to_string()]);
+    assert!(picks[1].update_refs.is_empty());
+}
+
+#[test]
+fn drop_commit_on_integration_line_drops_update_refs_when_first() {
+    let mut graph = Weave {
+        base_oid: oid("aaa"),
+        branch_sections: vec![],
+        integration_line: vec![
+            IntegrationEntry::Pick(make_commit_with_refs("111", "C1", vec!["loose-branch"])),
+            IntegrationEntry::Pick(make_commit("222", "C2")),
+        ],
+    };
+
+    assert_eq!(
+        graph.drop_commit(oid("111")),
+        Some(vec!["loose-branch".to_string()])
+    );
+
+    assert_eq!(graph.integration_line.len(), 1);
     assert!(
-        has_ref,
-        "update_refs should transfer to adjacent pick on integration line"
+        matches!(&graph.integration_line[0], IntegrationEntry::Pick(c) if c.update_refs.is_empty()),
+        "update_refs must not transfer to the next commit"
     );
 }
 

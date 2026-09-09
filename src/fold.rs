@@ -1447,19 +1447,30 @@ fn fold_commit_to_unstaged(repo: &Repository, commit_hash: &str) -> Result<()> {
     if is_head {
         git::reset_mixed(workdir, "HEAD~1")?;
     } else {
-        // Non-HEAD: capture the diff, drop the commit, then apply the diff
-        let diff = git::diff_commit(workdir, commit_hash)?;
-        let saved_head = head_oid.to_string();
-        let saved_refs = repo::snapshot_branch_refs(repo)?;
-
+        // Non-HEAD: drop the commit from the weave, then apply its diff
         let mut graph = Weave::from_repo(repo)?;
-        if !graph.drop_commit(target_oid) {
+        let Some(emptied) = graph.drop_commit(target_oid) else {
             bail!(
                 "Commit `{}` is not in the local commits (upstream..HEAD)\n\
                  If history was rewritten, the SHA may be stale — run `loom` to see the current commits",
                 git::short_hash(commit_hash)
             );
+        };
+        // A branch whose only commit is removed would be left pointing at a
+        // commit outside the integration history, invisible to loom.
+        if !emptied.is_empty() {
+            bail!(
+                "Cannot uncommit `{}`: it is the only commit of {}\n\
+                 Run `git branch -D {}` first, then uncommit again",
+                git::short_hash(commit_hash),
+                weave::describe_branches(&emptied),
+                emptied.join(" ")
+            );
         }
+
+        let diff = git::diff_commit(workdir, commit_hash)?;
+        let saved_head = head_oid.to_string();
+        let saved_refs = repo::snapshot_branch_refs(repo)?;
 
         let git_dir = repo.path().to_path_buf();
         let fold_ctx = serde_json::to_value(FoldVariant::CommitToUnstaged {

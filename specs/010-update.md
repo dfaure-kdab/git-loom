@@ -38,12 +38,13 @@ git-loom update [--yes]
 
 **Flags:**
 
-- `--yes` / `-y`: Skip the confirmation prompt when removing branches with gone upstreams.
+- `--yes` / `-y`: Skip the confirmation prompt when removing branches that are
+  fully merged upstream or whose upstream is gone.
 
 **Configuration:**
 
-- `loom.pruneGoneBranches` (boolean): When `true`, gone-upstream branches are
-  removed without prompting, as if `--yes` had been passed. Defaults to `false`.
+- `loom.pruneGoneBranches` (boolean): When `true`, those branches are removed
+  without prompting, as if `--yes` had been passed. Defaults to `false`.
 
 ## What Happens
 
@@ -67,14 +68,24 @@ git-loom update [--yes]
    restored.
 5. **Submodule update** (conditional): If `.gitmodules` exists, submodules are
    initialized and updated recursively.
-6. **Gone upstream cleanup**: Any local branches whose configured upstream
-   tracking branch no longer exists (pruned in step 2) are listed and the user
-   is prompted once to remove them. Use `--yes`, or set
-   `loom.pruneGoneBranches` to `true` in git config, to skip the prompt. Each branch
-   that is successfully deleted prints a success message. If a branch cannot be
-   deleted because it contains unmerged local commits, a warning is printed
-   instead: `"Skipped branch '<name>' — it has unmerged local commits. Use 'git branch -D <name>' to force-delete."` — the remaining branches are still
-   processed.
+6. **Branch cleanup**: Two kinds of local branches are listed, and the user
+   is prompted once to remove them all:
+   - branches fully merged upstream: the new upstream contains their tip, or
+     every commit was filtered out in step 3 (cherry-picked). Only branches
+     reachable from the integration branch count, and none at or below the
+     integration base (the first commit of its first-parent line that the
+     upstream contains): a local `main` sitting in upstream history is not
+     loom's to remove.
+   - branches whose configured upstream tracking branch no longer exists
+     (pruned in step 2)
+
+   Use `--yes`, or set `loom.pruneGoneBranches` to `true` in git config, to
+   skip the prompt. Branches are force-deleted (`git branch -D`); each one
+   prints a success message with the tip it had, so it can be revived. If a
+   branch cannot be deleted (checked out in another worktree, for instance),
+   a warning is printed instead: `"Skipped branch '<name>' — could not delete
+   it (run 'loom trace' for the git error)"` — the remaining branches are
+   still processed.
 
 **What stays the same:**
 - Feature branch refs are kept in sync via `--update-refs`
@@ -112,8 +123,13 @@ Two detection strategies are applied in order:
 
 When a branch section becomes empty after filtering (all its commits are
 already upstream), the section and its merge entry are removed from the
-todo. The branch ref is left as-is — fully merged branches are typically
-cleaned up by the gone-upstream step or manually by the user.
+todo. The same applies to an inner (stacked) branch whose commits were all
+filtered out: its ref is dropped from the todo rather than moved onto the
+next commit of the outer branch, which the inner branch never contained. In
+both cases the rebase leaves the ref untouched, and the branch is offered for
+removal in the cleanup step. Fully merged branches are not necessarily gone
+on the remote: in a fork workflow the merged pull request lives on the fork,
+which keeps its branch.
 
 If patch-ID computation fails (e.g. git is unavailable for the pipeline
 commands), a warning is displayed and filtering falls back to OID ancestry
@@ -212,6 +228,24 @@ git-loom update
 # ✓ Updated branch `integration` with `origin/main` (abc1234 Latest upstream commit)
 ```
 
+### Update with a branch merged upstream
+
+The stacked branch `feat1` was merged upstream while `feat2`, built on top of
+it, was not:
+
+```bash
+git-loom update
+# ✓ Fetched latest changes
+# ✓ Rebased onto upstream
+# ✓ Updated branch `integration` with `origin/main` (abc1234 Latest upstream commit)
+# ⚠ 1 local branch fully merged upstream:
+#   › feat1
+# Remove it? [y/N] y
+# ✓ Removed branch `feat1` (was def5678)
+```
+
+`feat2` keeps only its own commits, rebased onto the new upstream tip.
+
 ### Update with gone-upstream branches
 
 ```bash
@@ -220,8 +254,8 @@ git-loom update
 # ✓ Rebased onto upstream
 # ✓ Updated branch `integration` with `origin/main` (abc1234 Latest upstream commit)
 # ⚠ 2 local branches with a gone upstream:
-# old-feature
-# closed-pr
+#   › old-feature
+#   › closed-pr
 # Remove them? [y/N]
 ```
 
@@ -236,7 +270,7 @@ git-loom update
 # `loom abort`      to cancel and restore original state
 ```
 
-### Update with a gone branch that has unmerged commits
+### Update with a gone branch that cannot be deleted
 
 ```bash
 git-loom update
@@ -244,13 +278,13 @@ git-loom update
 # ✓ Rebased onto upstream
 # ✓ Updated branch `integration` with `origin/main` (abc1234 Latest upstream commit)
 # ⚠ 1 local branch with a gone upstream:
-# work-in-progress
+#   › work-in-progress
 # Remove it? [y/N] y
-# ⚠ Skipped branch `work-in-progress` — it has unmerged local commits.
-#   Use `git branch -D work-in-progress` to force-delete.
+# ⚠ Skipped branch `work-in-progress` — could not delete it (run `loom trace` for the git error)
 ```
 
-The unmerged branch is skipped but the rest of the cleanup proceeds normally.
+The branch (checked out in another worktree here) is skipped but the rest
+of the cleanup proceeds normally.
 
 ### Error: not on an integration branch
 

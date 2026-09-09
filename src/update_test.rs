@@ -789,11 +789,18 @@ fn update_handles_branch_cherry_picked_into_upstream() {
     test_repo.cherry_pick_to_remote(feature_oid, "Feature A work");
 
     // Run update
-    let result = test_repo.in_dir(|| super::run(false));
+    let result = test_repo.in_dir(|| super::run(true));
     assert!(
         result.is_ok(),
         "update should succeed when branch is cherry-picked upstream: {:?}",
         result.err()
+    );
+    assert!(
+        test_repo
+            .repo
+            .find_branch("feature-a", BranchType::Local)
+            .is_err(),
+        "feature-a is fully merged upstream and should be removed"
     );
 }
 
@@ -880,7 +887,7 @@ fn update_handles_fully_cherry_picked_branch() {
     test_repo.cherry_pick_to_remote(f1_oid, "F1");
     test_repo.cherry_pick_to_remote(f2_oid, "F2");
 
-    let result = test_repo.in_dir(|| super::run(false));
+    let result = test_repo.in_dir(|| super::run(true));
     assert!(
         result.is_ok(),
         "update should succeed when all branch commits are cherry-picked: {:?}",
@@ -912,24 +919,12 @@ fn update_handles_fully_cherry_picked_branch() {
         );
     }
 
-    // feature-a should still exist
-    let fa_branch = repo.find_branch("feature-a", BranchType::Local);
-    if let Ok(fa) = fa_branch {
-        let fa_oid = fa.get().target().unwrap();
-        let fa_commit = repo.find_commit(fa_oid).unwrap();
-        // feature-a must NOT point at an upstream commit (the original bug).
-        // It should point at a commit with one of its own messages, or at the
-        // merge base if all its commits were dropped.
-        let summary = fa_commit.summary().ok().flatten().unwrap_or("");
-        assert!(
-            summary == "F1"
-                || summary == "F2"
-                || summary == head.summary().ok().flatten().unwrap_or(""),
-            "feature-a should not point at an unrelated upstream commit, \
-             but points at: {}",
-            summary
-        );
-    }
+    // feature-a lost all its commits: removed rather than left pointing at
+    // an upstream commit
+    assert!(
+        repo.find_branch("feature-a", BranchType::Local).is_err(),
+        "feature-a is fully merged upstream and should be removed"
+    );
 }
 
 /// When the integration branch has a merge with inverted parent ordering
@@ -1183,6 +1178,166 @@ fn update_keeps_other_branches_when_one_lands_upstream() {
         test_repo.find_remote_branch_target("origin/main"),
         "feature-a should be rebased onto the new upstream tip"
     );
+}
+
+/// A stacked inner branch lands upstream: `feature-a` (A1) is woven through
+/// `feature-b` (A1, B1) built on top of it. Once A1 is upstream, feature-a has
+/// no commits left: it must be removed, not moved onto B1.
+#[test]
+fn update_removes_inner_branch_merged_upstream() {
+    let test_repo = TestRepo::new_with_remote();
+
+    let base_oid = test_repo.head_oid();
+    test_repo.create_branch_at_commit("feature-a", base_oid);
+    test_repo.switch_branch("feature-a");
+    test_repo.commit("A1", "a1.txt");
+
+    test_repo.create_branch_at_commit("feature-b", test_repo.head_oid());
+    test_repo.switch_branch("feature-b");
+    test_repo.commit("B1", "b1.txt");
+
+    test_repo.switch_branch("integration");
+    test_repo.merge_no_ff("feature-b");
+
+    test_repo.push_branch_to_remote_main("feature-a");
+
+    let result = test_repo.in_dir(|| super::run(true));
+    assert!(result.is_ok(), "update failed: {:?}", result.err());
+
+    let repo = &test_repo.repo;
+    assert!(
+        repo.find_branch("feature-a", BranchType::Local).is_err(),
+        "feature-a is fully merged upstream and should be removed"
+    );
+
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head.parent_count(), 2, "HEAD should still merge feature-b");
+    let feature_b = repo
+        .find_branch("feature-b", BranchType::Local)
+        .unwrap()
+        .get()
+        .target()
+        .unwrap();
+    assert_eq!(head.parent_id(1).unwrap(), feature_b);
+
+    // feature-b keeps only its own commit, rebased onto the new upstream tip
+    let b1 = repo.find_commit(feature_b).unwrap();
+    assert_eq!(b1.summary().unwrap().unwrap(), "B1");
+    assert_eq!(
+        b1.parent_id(0).unwrap(),
+        test_repo.find_remote_branch_target("origin/main")
+    );
+
+    // The local `main` at the base is also "contained upstream", but it is
+    // upstream history, not a merged feature branch.
+    assert!(
+        test_repo.branch_exists("main"),
+        "local main must not be treated as a merged branch"
+    );
+}
+
+/// The usual end of a pull request: the branch is merged upstream and its
+/// remote branch deleted. It is fully merged and gone at once, and must be
+/// listed and removed once.
+#[test]
+fn update_removes_branch_both_merged_and_gone() {
+    let test_repo = TestRepo::new_with_remote();
+    let remote_path = test_repo.remote_path().unwrap();
+    let workdir = test_repo.workdir();
+
+    let base_oid = test_repo.head_oid();
+    test_repo.create_branch_at_commit("feature-a", base_oid);
+    test_repo.switch_branch("feature-a");
+    test_repo.commit("A1", "a1.txt");
+    crate::git::run_git(&workdir, &["push", "-u", "origin", "feature-a"]).unwrap();
+
+    test_repo.switch_branch("integration");
+    test_repo.merge_no_ff("feature-a");
+
+    test_repo.push_branch_to_remote_main("feature-a");
+    {
+        let remote_repo = Repository::open_bare(&remote_path).unwrap();
+        let mut branch = remote_repo
+            .find_branch("feature-a", BranchType::Local)
+            .unwrap();
+        branch.delete().unwrap();
+    }
+
+    let result = test_repo.in_dir(|| super::run(true));
+    assert!(result.is_ok(), "update failed: {:?}", result.err());
+    assert!(
+        !test_repo.branch_exists("feature-a"),
+        "feature-a is merged and gone: it should be removed"
+    );
+}
+
+/// Both stacked branches land upstream: `feature-a` (A1) and `feature-b`
+/// (A1, B1), with the upstream now at B1. The merge base with the upstream is
+/// B1, so feature-a's tip sits below it and the weave never sees the branch:
+/// only ancestry finds it.
+#[test]
+fn update_removes_stacked_branches_merged_upstream() {
+    let test_repo = TestRepo::new_with_remote();
+
+    let base_oid = test_repo.head_oid();
+    test_repo.create_branch_at_commit("feature-a", base_oid);
+    test_repo.switch_branch("feature-a");
+    test_repo.commit("A1", "a1.txt");
+
+    test_repo.create_branch_at_commit("feature-b", test_repo.head_oid());
+    test_repo.switch_branch("feature-b");
+    test_repo.commit("B1", "b1.txt");
+
+    test_repo.switch_branch("integration");
+    test_repo.merge_no_ff("feature-b");
+
+    test_repo.push_branch_to_remote_main("feature-b");
+
+    let result = test_repo.in_dir(|| super::run(true));
+    assert!(result.is_ok(), "update failed: {:?}", result.err());
+
+    for name in ["feature-a", "feature-b"] {
+        assert!(
+            test_repo.repo.find_branch(name, BranchType::Local).is_err(),
+            "{name} is fully merged upstream and should be removed"
+        );
+    }
+    assert!(test_repo.branch_exists("main"));
+    assert_eq!(
+        test_repo.head_oid(),
+        test_repo.find_remote_branch_target("origin/main")
+    );
+}
+
+/// Branches sitting in upstream history below the integration branch's base
+/// (a stale local `main`, an old tag-like branch) are contained by the new
+/// upstream too, but they were never loom's to remove.
+#[test]
+fn update_keeps_branches_below_the_base() {
+    let test_repo = TestRepo::new_with_remote();
+    let initial_oid = test_repo.head_oid();
+
+    // Move the base forward: integration already has upstream commit X
+    let x_oid = test_repo.add_remote_commits(&["X"]);
+    test_repo.fetch_remote();
+    test_repo.reset_hard(x_oid);
+    test_repo.create_branch_at_commit("stale", initial_oid);
+    test_repo.create_branch_at_commit("at-base", x_oid);
+
+    test_repo.create_branch_at_commit("feature", x_oid);
+    test_repo.switch_branch("feature");
+    test_repo.commit("F1", "f1.txt");
+    test_repo.switch_branch("integration");
+    test_repo.merge_no_ff("feature");
+
+    test_repo.add_remote_commits(&["Y"]);
+
+    let result = test_repo.in_dir(|| super::run(true));
+    assert!(result.is_ok(), "update failed: {:?}", result.err());
+
+    for name in ["stale", "at-base", "main", "feature"] {
+        assert!(test_repo.branch_exists(name), "{name} must survive update");
+    }
 }
 
 /// `update` can fail before its rebase ever starts — here because a woven

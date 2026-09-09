@@ -422,11 +422,12 @@ git -C "$OTHER" add doc.md
 git -C "$OTHER" commit -q -m "Rewrite doc"
 git -C "$OTHER" push -q origin "$base_branch"
 
-out=$(gl update 2>&1)
+out=$(gl update -y 2>&1)
 assert_exit_ok $? "cherry_pick_filter_ok"
 assert_contains "$out" "Rebased onto upstream" "cherry_pick_rebased"
 # The feature commit message should still be in history (from the upstream copy)
 assert_log_contains "Rewrite doc" "cherry_pick_commit_in_log"
+assert_branch_not_exists "cherry-feat" "cherry_pick_branch_removed"
 
 describe "partially cherry-picked branch keeps remaining commits"
 setup_repo_with_remote
@@ -483,11 +484,14 @@ git -C "$OTHER" add ff2.txt
 git -C "$OTHER" commit -q -m "Full F2"
 git -C "$OTHER" push -q origin "$base_branch"
 
-out=$(gl update 2>&1)
+out=$(gl update -y 2>&1)
 assert_exit_ok $? "full_cherry_ok"
 assert_contains "$out" "Rebased onto upstream" "full_cherry_rebased"
 assert_log_contains "Full F1" "full_cherry_f1_in_log"
 assert_log_contains "Full F2" "full_cherry_f2_in_log"
+assert_contains "$out" "fully merged upstream" "full_cherry_merged_warning"
+assert_contains "$out" "Removed branch" "full_cherry_branch_removed"
+assert_branch_not_exists "full-cherry" "full_cherry_branch_deleted"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WOVEN BRANCH LANDING UPSTREAM
@@ -511,9 +515,37 @@ weave_branch "lands"
 base_branch=$(git -C "$WORK" rev-parse --abbrev-ref --symbolic-full-name @{u} | sed 's|^origin/||')
 git -C "$WORK" push -q origin "lands:$base_branch"
 
-out=$(gl update 2>&1)
+out=$(gl update -y 2>&1)
 assert_exit_ok $? "lands_upstream_ok"
 assert_log_contains "Stays F1" "lands_upstream_other_branch_kept"
 assert_eq "$(git -C "$WORK" rev-parse HEAD^2)" "$(git -C "$WORK" rev-parse stays)" "lands_upstream_still_woven"
+assert_branch_not_exists "lands" "lands_upstream_merged_branch_removed"
+assert_branch_exists "stays" "lands_upstream_live_branch_kept"
+
+describe "stacked inner branch merged upstream is removed, outer branch keeps its commit"
+setup_repo_with_remote
+create_feature_branch "inner"
+switch_to inner
+commit_file "Inner I1" "inner1.txt"
+git -C "$WORK" branch outer inner
+switch_to outer
+commit_file "Outer O1" "outer1.txt"
+switch_to integration
+weave_branch "outer"
+
+# `inner` lands upstream as a fast-forward; `outer` still has O1 on top
+base_branch=$(git -C "$WORK" rev-parse --abbrev-ref --symbolic-full-name @{u} | sed 's|^origin/||')
+git -C "$WORK" push -q origin "inner:$base_branch"
+
+out=$(gl update -y 2>&1)
+assert_exit_ok $? "stacked_merged_ok"
+assert_contains "$out" "fully merged upstream" "stacked_merged_warning"
+assert_contains "$out" "Removed branch inner" "stacked_merged_inner_removed_msg"
+assert_branch_not_exists "inner" "stacked_merged_inner_removed"
+assert_branch_exists "outer" "stacked_merged_outer_kept"
+assert_branch_exists "$base_branch" "stacked_merged_local_base_kept"
+assert_eq "$(git -C "$WORK" rev-parse HEAD^2)" "$(git -C "$WORK" rev-parse outer)" "stacked_merged_outer_still_woven"
+assert_eq "$(git -C "$WORK" log --format=%s -1 outer)" "Outer O1" "stacked_merged_outer_commit"
+assert_eq "$(git -C "$WORK" rev-parse outer^)" "$(git -C "$WORK" rev-parse "origin/$base_branch")" "stacked_merged_outer_on_upstream"
 
 pass
