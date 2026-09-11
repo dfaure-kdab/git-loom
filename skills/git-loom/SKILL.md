@@ -23,8 +23,9 @@ fine.
 2. **Never use `-p`/`--patch`** — it opens a full-screen UI and is rejected in
    agent mode.
 3. **Always pass `-m <message>`** to `commit`, `split`, and `reword` (commit
-   targets), and be explicit about targets (`-b <branch>` for commit) —
-   omitted arguments would need a prompt.
+   targets), and be explicit about the commit target: `-b <branch>` for a
+   feature branch, `-i` for the integration branch itself — omitted arguments
+   would need a prompt.
 4. **Never use the `zz` short ID**, except as the destination of
    `git loom fold <commit> zz` (uncommitting). Always name the files you mean:
    `git loom add <files>`, `git loom commit -b <branch> -m "<msg>" <files...>`,
@@ -72,7 +73,7 @@ branches.
 | Instead of | Use |
 |---|---|
 | `git add <files>` | `git loom add <files>` — list the files explicitly, never `zz` |
-| `git commit` | `git loom commit -b <branch> -m "<msg>" <files...>` — commits onto a feature branch without leaving integration; a new branch name creates the branch. Always name the files to commit (or omit them to commit exactly what you staged with `git loom add`); never `zz` |
+| `git commit` | `git loom commit -b <branch> -m "<msg>" <files...>` — commits onto a feature branch without leaving integration; a new branch name creates the branch. Use `-i` instead of `-b` to commit to the integration branch itself. Always name the files to commit (or omit them to commit exactly what you staged with `git loom add`); never `zz` |
 | `git commit --amend` (files into HEAD or any commit) | `git loom fold <files...> <commit>` (staged changes: `git loom fold <commit>`) |
 | `git rebase -i` + fixup | `git loom fold <commit> <commit>` or `git loom absorb` (auto-distributes working-tree changes into the commits that introduced those lines; `-n` for a dry run) |
 | moving a commit to another branch | `git loom fold <commit> <branch>` (`-c` creates a new branch from it) |

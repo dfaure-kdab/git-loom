@@ -51,6 +51,45 @@ assert_contains "$out" "on branch"    "loose_override_on_branch"
 assert_contains "$out" "g-forced"     "loose_override_branch_name"
 assert_branch_exists "g-forced"       "loose_override_branch_exists"
 
+describe "loose commit: -i commits to the integration branch"
+setup_repo_with_remote
+write_file "loose.txt" "loose content"
+git -C "$WORK" add loose.txt
+out=$(gl commit -i -m "Integration commit")
+assert_exit_ok $? "integration_ok"
+assert_contains "$out" "Created commit"     "integration_created_msg"
+assert_not_contains "$out" "on branch"      "integration_no_branch_label"
+assert_head_msg "Integration commit"        "integration_head_msg"
+assert_head_parent_count 1                  "integration_single_parent"
+
+describe "loose commit: -i skips the picker and leaves woven branches alone"
+setup_repo_with_remote
+create_feature_branch "g-untouched"
+switch_to g-untouched
+commit_file "Branch work" "branch-work.txt"
+switch_to integration
+weave_branch "g-untouched"
+old_tip=$(branch_oid g-untouched)
+old_head=$(git -C "$WORK" rev-parse HEAD)
+write_file "on-integration.txt" "integration content"
+git -C "$WORK" add on-integration.txt
+out=$(gl commit -i -m "On integration")
+assert_exit_ok $? "integration_woven_ok"
+assert_head_msg "On integration"            "integration_woven_head_msg"
+assert_head_parent_count 1                  "integration_woven_single_parent"
+assert_msg_at 1 "Merge g-untouched"          "integration_woven_parent_is_merge"
+assert_eq "$old_tip" "$(branch_oid g-untouched)" "integration_woven_tip_unmoved"
+assert_ne "$old_head" "$(git -C "$WORK" rev-parse HEAD)" "integration_woven_head_moved"
+
+describe "loose commit: -i together with -b is rejected"
+setup_repo_with_remote
+write_file "both.txt" "both content"
+git -C "$WORK" add both.txt
+gl_capture commit -i -b g-nope -m "Both flags"
+assert_exit_fail "$CODE" "integration_conflict_fails"
+assert_contains "$OUT" "cannot be used with" "integration_conflict_msg"
+assert_branch_not_exists "g-nope"            "integration_conflict_no_branch"
+
 # ══════════════════════════════════════════════════════════════════════════════
 # COMMIT TO EXISTING WOVEN BRANCH
 # ══════════════════════════════════════════════════════════════════════════════

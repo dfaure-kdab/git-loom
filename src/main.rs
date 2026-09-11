@@ -202,6 +202,9 @@ enum Command {
         /// Target feature branch (name or short ID)
         #[arg(short = 'b', long = "branch")]
         branch: Option<String>,
+        /// Commit to the integration branch (loose commit), skipping the branch prompt
+        #[arg(short = 'i', long = "integration", conflicts_with = "branch")]
+        integration: bool,
         /// Commit message (if not provided, opens editor)
         #[arg(short, long)]
         message: Option<String>,
@@ -582,10 +585,11 @@ fn main() {
         Some(Command::Reword { target, message }) => reword::run(target, message),
         Some(Command::Commit {
             branch,
+            integration,
             message,
             patch,
             files,
-        }) => commit::run(branch, message, patch, files, &theme),
+        }) => commit::run(branch, integration, message, patch, files, &theme),
         Some(Command::Swap { a, b }) => swap::run(a, b),
         Some(Command::Drop { target, yes }) => drop::run(target, yes),
         Some(Command::Absorb { dry_run, files }) => absorb::run(dry_run, files),

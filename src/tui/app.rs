@@ -165,7 +165,7 @@ fn execute_action(action: Action, git_dir: &std::path::Path, theme: &graph::Them
     };
     crate::trace::init(git_dir, &format!("loom tui: {}", name));
     match action {
-        Action::Commit { files } => commit::run(None, None, false, files, theme),
+        Action::Commit { files } => commit::run(None, false, None, false, files, theme),
         Action::Fold { sources, target } => {
             let mut args = sources;
             args.push(target);

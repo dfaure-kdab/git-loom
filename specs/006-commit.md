@@ -6,11 +6,11 @@
 integration branch. It stages files, creates the commit, and automatically
 relocates it to the target feature branch, updating the integration topology.
 
-When the integration branch name matches the upstream's local counterpart
-(e.g. `main` tracking `origin/main`) and `-b` is omitted, the commit is
-created directly on the integration branch as a **loose commit** — no branch
-targeting or rebase needed. This works regardless of whether local commits
-or woven branches already exist.
+With `-i`, or when the integration branch name matches the upstream's local
+counterpart (e.g. `main` tracking `origin/main`) and `-b` is omitted, the
+commit is created directly on the integration branch as a **loose commit** —
+no branch targeting or rebase needed. This works regardless of whether local
+commits or woven branches already exist.
 
 ## Why Commit?
 
@@ -30,13 +30,15 @@ Creating a commit on a feature branch within an integration workflow has frictio
 ## CLI
 
 ```bash
-git-loom commit [-b <branch>] [-m <message>] [-p] [files...]
+git-loom commit [-b <branch> | -i] [-m <message>] [-p] [files...]
 ```
 
 **Arguments:**
 
 - `-b, --branch <branch>`: Target feature branch (name or short ID). Optional;
   prompts interactively if omitted.
+- `-i, --integration`: Commit to the integration branch itself (loose commit),
+  skipping the branch prompt. Mutually exclusive with `-b`.
 - `-m, --message <message>`: Commit message. Optional; opens editor if omitted.
 - `-p, --patch`: Interactively select hunks to stage before committing (see
   spec 007 for the hunk picker).
@@ -64,10 +66,10 @@ git-loom commit [-b <branch>] [-m <message>] [-p] [files...]
 ### Flow
 
 1. **Stage resolution**: Apply the staging rules (see CLI section above).
-2. **Loose commit check**: If `-b` is omitted and the integration branch
-   name matches the upstream's local counterpart (e.g. `main` tracking
-   `origin/main`), create the commit directly on the integration branch
-   and stop — no branch resolution or rebase needed.
+2. **Loose commit check**: If `-i` is given, or if `-b` is omitted and the
+   integration branch name matches the upstream's local counterpart (e.g.
+   `main` tracking `origin/main`), create the commit directly on the
+   integration branch and stop — no branch resolution or rebase needed.
 3. **Branch resolution**: Determine the target feature branch.
 4. **Message resolution**: Get the commit message.
 5. **Commit creation**: Create the commit.
@@ -84,7 +86,12 @@ When `-b` is provided:
 - If it doesn't match any existing branch: treat it as a new branch name,
   validate it, create the branch at the merge-base, then proceed.
 
-When `-b` is omitted:
+When `-i` is given:
+
+- Create a loose commit directly on the integration branch, whatever its name
+  and whatever branches are woven into it. No branch picker is shown.
+
+When `-b` and `-i` are both omitted:
 
 - **If the integration branch name matches the upstream's local counterpart**
   (e.g. `main` tracking `origin/main`): create a loose commit directly on
@@ -169,6 +176,16 @@ git-loom commit zz -m "quick fix"
 # Works even if local commits or woven branches already exist
 ```
 
+### Loose commit forced with -i
+
+```bash
+git-loom status
+# On "integration" tracking "origin/main", with woven branches
+
+git-loom commit -i zz -m "tweak the integration branch"
+# Creates the commit on the integration tip, no branch picker, no rebase
+```
+
 ### Loose commit skipped when -b is provided
 
 ```bash
@@ -251,9 +268,13 @@ a loose commit directly on the integration branch. This was chosen because:
   or woven branches exist, so the workflow is consistent
 - **Explicit override**: Providing `-b` always forces branch-targeted mode, so
   the user retains full control
-- **Name-gated**: Only branches whose name matches the upstream (e.g. `main`
-  tracking `origin/main`) get loose commits. Custom integration branch names
-  (e.g. `integration` tracking `origin/main`) always require `-b`
+- **Name-based default**: Only branches whose name matches the upstream (e.g.
+  `main` tracking `origin/main`) get loose commits by default. Custom
+  integration branch names (e.g. `integration` tracking `origin/main`) require
+  `-b` or `-i`
+- **Explicit opt-in**: `-i` asks for a loose commit on any integration branch,
+  for the occasional change that belongs to the integration branch itself
+  rather than to a feature branch
 
 ### `zz` as Reserved Token
 

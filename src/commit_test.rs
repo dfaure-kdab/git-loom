@@ -1,9 +1,21 @@
 use crate::core::graph;
 use crate::core::test_helpers::TestRepo;
 
-/// Wrapper so existing tests don't need to pass patch/theme.
+/// Wrapper so existing tests don't need to pass integration/patch/theme.
 fn run(branch: Option<String>, message: Option<String>, files: Vec<String>) -> anyhow::Result<()> {
-    super::run(branch, message, false, files, &graph::Theme::dark())
+    super::run(branch, false, message, false, files, &graph::Theme::dark())
+}
+
+/// Wrapper for `-i`: commit to the integration branch.
+fn run_integration(message: &str, files: Vec<String>) -> anyhow::Result<()> {
+    super::run(
+        None,
+        true,
+        Some(message.to_string()),
+        false,
+        files,
+        &graph::Theme::dark(),
+    )
 }
 
 /// Helper: set up a test repo with an empty feature branch at the merge-base.
@@ -531,6 +543,78 @@ fn commit_with_branch_flag_does_not_create_loose() {
         2,
         "HEAD should be a merge commit (branch woven)"
     );
+}
+
+#[test]
+fn commit_integration_flag_forces_loose_on_custom_named_branch() {
+    // "integration" tracks "origin/main", so the name does not match the
+    // upstream — without -i this would prompt for a branch.
+    let test_repo = TestRepo::new_with_remote();
+    let base_oid = test_repo.find_remote_branch_target("origin/main");
+
+    test_repo.write_file("loose.txt", "content");
+
+    let result =
+        test_repo.in_dir(|| run_integration("Loose commit", vec!["loose.txt".to_string()]));
+
+    assert!(result.is_ok(), "loose commit failed: {:?}", result);
+
+    let head = test_repo.head_commit();
+    assert_eq!(head.parent_count(), 1, "Loose commit should have 1 parent");
+    assert_eq!(head.summary().unwrap().unwrap(), "Loose commit");
+    assert_eq!(head.parent(0).unwrap().id(), base_oid);
+}
+
+#[test]
+fn commit_integration_flag_commits_on_top_of_merges() {
+    // With woven branches, -i must still land the commit on the integration
+    // tip instead of moving it onto a feature branch.
+    let test_repo = setup_with_two_branches();
+    let old_head = test_repo.head_commit().id();
+
+    test_repo.write_file("loose.txt", "content");
+
+    let result =
+        test_repo.in_dir(|| run_integration("Loose commit", vec!["loose.txt".to_string()]));
+
+    assert!(result.is_ok(), "loose commit failed: {:?}", result);
+
+    let head = test_repo.head_commit();
+    assert_eq!(head.summary().unwrap().unwrap(), "Loose commit");
+    assert_eq!(head.parent_count(), 1);
+    assert_eq!(head.parent(0).unwrap().id(), old_head);
+
+    // The feature branches must be untouched.
+    assert_eq!(test_repo.branch_commit_summary("feature-a"), "A1");
+    assert_eq!(test_repo.branch_commit_summary("feature-b"), "B1");
+}
+
+#[test]
+fn commit_integration_flag_keeps_other_staged_files_staged() {
+    // Committing named files must not sweep up — or unstage — work the user
+    // had already staged for something else.
+    let test_repo = TestRepo::new_with_remote();
+
+    test_repo.write_file("other.txt", "other content");
+    test_repo.stage_files(&["other.txt"]);
+    test_repo.write_file("mine.txt", "mine content");
+
+    let result = test_repo.in_dir(|| run_integration("Only mine", vec!["mine.txt".to_string()]));
+    assert!(result.is_ok(), "loose commit failed: {:?}", result);
+
+    // The commit holds only the named file.
+    assert_eq!(
+        test_repo.commit_file_paths(test_repo.head_commit().id()),
+        vec!["mine.txt"]
+    );
+
+    // other.txt is staged again, with its content intact.
+    let status = test_repo.status_porcelain();
+    assert!(
+        status.lines().any(|l| l == "A  other.txt"),
+        "other.txt must still be staged, got: {status:?}"
+    );
+    assert_eq!(test_repo.read_file("other.txt"), "other content");
 }
 
 // ── Prerequisites ────────────────────────────────────────────────────────

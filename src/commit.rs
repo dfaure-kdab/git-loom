@@ -18,12 +18,15 @@ struct CommitContext {
     branch_name: String,
 }
 
-/// Create a commit on a feature branch without leaving the integration branch.
+/// Create a commit without leaving the integration branch.
 ///
-/// Stages files, creates the commit at HEAD, then uses Weave to relocate
-/// it to the target feature branch (creating merge topology if needed).
+/// Stages files, then either commits on the integration branch itself (a
+/// loose commit: `-i`, or a branch name matching its upstream), or commits at
+/// HEAD and uses Weave to relocate it to the target feature branch (creating
+/// merge topology if needed).
 pub fn run(
     branch: Option<String>,
+    integration: bool,
     message: Option<String>,
     patch: bool,
     files: Vec<String>,
@@ -36,7 +39,7 @@ pub fn run(
             "Commit message",
             vec![],
             false,
-            "re-run with: loom commit -m <message> [-b <branch>] [files...]",
+            "re-run with: loom commit -m <message> [-b <branch> | -i] [files...]",
         ));
     }
 
@@ -73,12 +76,15 @@ pub fn run(
         }
     };
 
-    // Loose commit: when no -b flag and local branch name matches the
-    // upstream's local counterpart (e.g. "main" tracking "origin/main"),
-    // commit directly on the integration branch without targeting a feature
-    // branch. This works regardless of whether local commits or woven
-    // branches already exist.
-    if branch.is_none() && info.branch_name == repo::upstream_local_branch(&info.upstream.label) {
+    // Loose commit: commit directly on the integration branch without
+    // targeting a feature branch. Happens with -i, or when no -b flag is
+    // given and the local branch name matches the upstream's local
+    // counterpart (e.g. "main" tracking "origin/main"). This works
+    // regardless of whether local commits or woven branches already exist.
+    let loose = integration
+        || (branch.is_none()
+            && info.branch_name == repo::upstream_local_branch(&info.upstream.label));
+    if loose {
         let result = do_commit();
         git::restore_staged_patch(&workdir, &saved_staged)?;
         result?;
@@ -329,7 +335,8 @@ fn pick_branch(
         }
     };
 
-    let hint = "re-run with: loom commit -b <branch> -m <message> [files...] (a new name creates the branch)";
+    let hint = "re-run with: loom commit -b <branch> -m <message> [files...] \
+                (a new name creates the branch), or -i for the integration branch itself";
     let name = if branch_names.is_empty() {
         msg::input("Branch name", hint, not_empty)?
     } else {
