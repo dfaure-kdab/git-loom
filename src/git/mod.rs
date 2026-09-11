@@ -267,25 +267,46 @@ pub fn short_hash(hash: &str) -> &str {
 /// Resolve the path to the git-loom binary.
 ///
 /// During `cargo test`, `current_exe()` returns the test harness binary in
-/// `target/<profile>/deps/`. The actual git-loom binary lives one level up
-/// in `target/<profile>/`. This function detects that case and returns the
-/// correct path.
-pub fn loom_exe_path() -> Result<std::path::PathBuf> {
-    let exe = std::env::current_exe()?;
-    if let Some(parent) = exe.parent()
-        && parent.file_name().and_then(|n| n.to_str()) == Some("deps")
-    {
-        let bin_name = if cfg!(windows) {
-            "git-loom.exe"
-        } else {
-            "git-loom"
-        };
-        if let Some(profile_dir) = parent.parent() {
-            let actual = profile_dir.join(bin_name);
-            if actual.exists() {
-                return Ok(actual);
-            }
-        }
-    }
-    Ok(exe)
+/// `target/<profile>/deps/`, while the binary itself sits one level up in
+/// `target/<profile>/` — put there by cargo because `tests/bin_is_built.rs`
+/// makes the package's binaries part of the test build.
+pub fn loom_exe_path() -> Result<PathBuf> {
+    resolve_loom_exe(&std::env::current_exe()?)
 }
+
+/// Resolve `exe` to the real git-loom binary; see [`loom_exe_path`].
+///
+/// Erroring beats handing back the harness: the caller gives this to git as the
+/// rebase sequence editor, and a harness rejects `--source` with
+/// `Unrecognized option` and exit 101, so git aborts with "there was a problem
+/// with the editor" and the caller reports nothing but `git rebase failed`.
+fn resolve_loom_exe(exe: &Path) -> Result<PathBuf> {
+    // A `deps` directory only means a harness under `cargo test`. An installed
+    // binary that happens to sit in one is just a binary, and telling its user
+    // to run `cargo build` would be nonsense.
+    if !cfg!(test) {
+        return Ok(exe.to_path_buf());
+    }
+    let Some(parent) = exe.parent() else {
+        return Ok(exe.to_path_buf());
+    };
+    if parent.file_name().and_then(|n| n.to_str()) != Some("deps") {
+        return Ok(exe.to_path_buf());
+    }
+    let Some(profile_dir) = parent.parent() else {
+        return Ok(exe.to_path_buf());
+    };
+
+    let actual = profile_dir.join(format!("git-loom{}", std::env::consts::EXE_SUFFIX));
+    if !actual.exists() {
+        bail!(
+            "'{}' does not exist — run `cargo build` before `cargo test`",
+            actual.display()
+        );
+    }
+    Ok(actual)
+}
+
+#[cfg(test)]
+#[path = "mod_test.rs"]
+mod tests;

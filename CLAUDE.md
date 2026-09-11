@@ -82,6 +82,15 @@ The `specs/` directory contains detailed design documents that describe each fea
 - **Format:** `cargo fmt`
 - **Check (fast compile check):** `cargo check`
 
+### `tests/bin_is_built.rs`
+
+The unit tests drive real rebases, and they hand git the binary at
+`target/<profile>/git-loom` as its sequence editor. `cargo test` builds a bin target
+only when the package has an integration test, so that file's existence is what
+puts the binary there — and what rebuilds it when a source file changes.
+Deleting it makes every rebase-driven test fail in a tree that has not been
+built, around 120 of them.
+
 ## Non-Negotiable: Never Lose User Data
 
 git-loom must never discard user data — staged changes, working tree changes, or uncommitted work — as a side effect of any operation, including conflict resolution, abort, or continue flows.
