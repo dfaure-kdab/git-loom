@@ -106,6 +106,25 @@ agent mode prompts are answered by re-invoking with explicit arguments. And
 never pass `zz` to `add`, `commit`, `drop`, or anything else — the sole
 exception is `git loom fold <commit> zz`.
 
+## Keeping a commit you are about to rewrite
+
+Loom rebases with `git rebase --update-refs`, which moves *any* branch whose
+tip is one of the commits being rewritten. A branch created on a commit that is
+still in the weave is therefore not a backup: the next `fold`, `reword` or
+`swap` carries it along with the commit it points at. Branches outside the
+weave are left alone.
+
+To keep the old version before reworking a commit, do the rewrite first, then
+branch:
+
+```sh
+git loom fold <files> <commit>     # the old commit is now unreferenced
+git branch <name> <old sha>        # outside the weave, so loom won't move it
+```
+
+`git tag <name> <old sha>` works at any time, before or after, since
+`--update-refs` only updates `refs/heads/`.
+
 ## Conflict handling
 
 When a status line says `"paused"`, or any loom command reports that an
