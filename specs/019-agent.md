@@ -18,7 +18,8 @@ Loom is designed for humans: every optional argument falls back to an
 interactive prompt (branch pickers, confirmations) or a full-screen hunk picker
 (`-p`). A headless agent that runs `git-loom commit -m "fix"` without `-b`
 hits a prompt that cannot render, and has no way to learn which branches it
-could have passed. Without packaged guidance, agents also fall back to raw
+could have passed, or that `-i` would commit to the integration branch
+itself. Without packaged guidance, agents also fall back to raw
 `git rebase`/`git commit --amend`, which desynchronizes the weave.
 
 Agent mode turns every prompt into data: the list of choices, and the exact
@@ -96,7 +97,7 @@ lines the command printed (some commands print several; none may be present).
 ```json
 {"status":"needs_input","kind":"select","prompt":"Select target branch",
  "options":["feature-auth","feature-ui"],"allow_other":true,
- "hint":"re-run with: loom commit -b <branch> -m <message> [files...] (a new name creates the branch)"}
+ "hint":"re-run with: loom commit -b <branch> -m <message> [files...] (a new name creates the branch), or -i for the integration branch itself"}
 ```
 
 Emitted when the command would have opened an interactive prompt **before
@@ -165,7 +166,7 @@ mentions the skipped action in `messages`).
 
 | Command / prompt | Class | Agent-mode behavior |
 |---|---|---|
-| `commit` branch picker (no `-b`) | pre-flight | `needs_input` (select, `allow_other`) listing woven branches; hint: `loom commit -b <branch> -m <message> [files...]` (a new name creates the branch) |
+| `commit` branch picker (no `-b`, no `-i`) | pre-flight | `needs_input` (select, `allow_other`) listing woven branches; hint: `loom commit -b <branch> -m <message> [files...]` (a new name creates the branch), or `-i` for the integration branch itself |
 | `commit` editor (no `-m`) | pre-flight | `needs_input` (text); hint: pass `-m <message>` |
 | `split` message editor (no `-m`) | pre-flight | `needs_input` (text); hint: pass `-m <message>` |
 | `split` file picker (no files, no `-p`) | pre-flight | `needs_input` (multiselect) listing the commit's files; hint: `loom split <target> -m <message> <files...>` |
@@ -309,7 +310,7 @@ $ git-loom commit --agent -m "Fix login validation"
 ```json
 {"status":"needs_input","kind":"select","prompt":"Select target branch",
  "options":["feature-auth","feature-ui"],"allow_other":true,
- "hint":"re-run with: loom commit -b <branch> -m <message> [files...] (a new name creates the branch)"}
+ "hint":"re-run with: loom commit -b <branch> -m <message> [files...] (a new name creates the branch), or -i for the integration branch itself"}
 ```
 
 ```

@@ -81,6 +81,24 @@ fn early_theme_reads_the_raw_args() {
     assert!(matches!(early_theme(&args(&["--theme"])), ThemeArg::Auto));
 }
 
+/// clap validates arg ids, conflicts, and groups only when the command is
+/// built; this catches a typo in e.g. `conflicts_with` that would otherwise
+/// panic at runtime.
+#[test]
+fn cli_definition_is_valid() {
+    Cli::command().debug_assert();
+}
+
+/// `commit -i` targets the integration branch and `-b` a feature branch;
+/// accepting both would silently drop one of them.
+#[test]
+fn commit_rejects_integration_with_branch() {
+    let parse = |args: &[&str]| Cli::try_parse_from(["git-loom"].iter().chain(args).copied());
+    assert!(parse(&["commit", "-i", "-m", "m"]).is_ok());
+    assert!(parse(&["commit", "-b", "feature-a", "-m", "m"]).is_ok());
+    assert!(parse(&["commit", "-i", "-b", "feature-a", "-m", "m"]).is_err());
+}
+
 #[test]
 fn cli_help_renders() {
     // Catches template/marker mistakes that only clap's renderer would reject.

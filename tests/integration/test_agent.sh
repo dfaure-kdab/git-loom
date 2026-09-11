@@ -86,6 +86,8 @@ assert_contains "$OUT" "feature-a" "commit_needs_input_option_a"
 assert_contains "$OUT" "feature-b" "commit_needs_input_option_b"
 assert_contains "$OUT" '"allow_other":true' "commit_needs_input_allow_other"
 assert_contains "$OUT" '"hint":' "commit_needs_input_hint"
+assert_contains "$OUT" "or -i for the integration branch itself" \
+    "commit_needs_input_hint_mentions_integration"
 # Nothing was committed
 assert_log_not_contains "C1" "commit_needs_input_no_commit"
 
