@@ -18,7 +18,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --check
-      - run: cargo clippy -- -Dwarnings
+      - run: cargo clippy --all-targets -- -Dwarnings
 
   test:
     name: Test (${{ matrix.os }})
@@ -30,8 +30,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --locked
-      - run: cargo test
+      # No `cargo build` first, on purpose: `cargo test` has to produce
+      # target/<profile>/git-loom by itself, which is what tests/bin_is_built.rs
+      # is for. Building here would hide its removal.
+      - run: cargo test --locked
       - if: runner.os == 'Linux'
         run: bash test-integration.sh
 
@@ -45,9 +47,6 @@ jobs:
       # what it reads back. These steps are the suite again, this time with
       # a global config built to break it — see tests/hostile.gitconfig. The
       # variable is set per step, not per job, to keep it away from `checkout`.
-      # The build comes first: the tests run target/debug/git-loom as the
-      # rebase sequence editor and fall back to the test binary without it.
-      - run: cargo build --locked
       - run: cargo test --locked
         env:
           GIT_CONFIG_GLOBAL: ${{ github.workspace }}/tests/hostile.gitconfig
