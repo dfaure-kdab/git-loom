@@ -370,6 +370,35 @@ fn drop_unknown_commit_or_branch_is_refused() {
     assert_eq!(graph.integration_line.len(), 1);
 }
 
+/// A branch based on an integration commit carries that commit in its section
+/// too, but the integration line keeps it, so the drop does not remove it.
+#[test]
+fn branch_drop_size_excludes_commits_the_integration_line_keeps() {
+    let graph = Weave {
+        base_oid: oid(BASE),
+        branch_sections: vec![BranchSection {
+            reset_target: "onto".to_string(),
+            commits: vec![
+                make_commit(OID_INT, "Int"),
+                make_commit(OID_A1, "A1"),
+                make_commit(OID_A2, "A2"),
+            ],
+            label: "feature-a".to_string(),
+            branch_names: vec!["feature-a".to_string()],
+        }],
+        integration_line: vec![
+            IntegrationEntry::Pick(make_commit(OID_INT, "Int")),
+            IntegrationEntry::Merge {
+                original_oid: Some(oid(OID_MERGE1)),
+                label: "feature-a".to_string(),
+            },
+        ],
+        base_refs: vec![],
+    };
+
+    assert_eq!(graph.branch_drop_size("feature-a"), Some(2));
+}
+
 #[test]
 fn drop_branch_removes_section_and_merge() {
     let mut graph = Weave {
@@ -401,6 +430,9 @@ fn drop_branch_removes_section_and_merge() {
         ],
         base_refs: vec![],
     };
+
+    assert_eq!(graph.branch_drop_size("feature-a"), Some(1));
+    assert_eq!(graph.branch_drop_size("no-such-branch"), None);
 
     assert!(graph.drop_branch("feature-a"));
 
@@ -1301,6 +1333,9 @@ fn drop_branch_preserves_colocated_update_refs_at_boundary() {
         }],
         base_refs: vec![],
     };
+
+    // Only C2 goes: C1 carries the inner refs and stays.
+    assert_eq!(graph.branch_drop_size("feat3"), Some(1));
 
     assert!(graph.drop_branch("feat3"));
 

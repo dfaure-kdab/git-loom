@@ -256,13 +256,10 @@ fn drop_branch(repo: &Repository, branch_name: &str, skip_confirm: bool) -> Resu
     let head_oid = repo::head_oid(repo)?;
     let merge_base_oid = info.upstream.merge_base_oid;
 
+    // An empty branch owns nothing, so there is nothing to confirm losing.
     if branch_info.tip_oid == merge_base_oid {
-        confirm_or_bail(
-            skip_confirm,
-            &format!("Drop empty branch `{}`?", branch_name),
-        )?;
         git::branch_delete(workdir, branch_name)?;
-        msg::success(&format!("Dropped branch `{}`", branch_name));
+        msg::success(&dropped_message(branch_name, &DropScope::Empty));
         return Ok(());
     }
 
@@ -293,23 +290,40 @@ fn drop_branch(repo: &Repository, branch_name: &str, skip_confirm: bool) -> Resu
         );
     }
 
-    let owned = find_owned_commits(
-        repo,
-        branch_info.tip_oid,
-        merge_base_oid,
-        &info.branches,
-        branch_name,
-    )?;
-    let commit_count = owned.len();
-    let prompt = if commit_count == 1 {
-        format!("Drop branch `{}` and its 1 commit?", branch_name)
+    let owned = if is_woven {
+        Vec::new()
     } else {
-        format!(
-            "Drop branch `{}` and its {} commits?",
-            branch_name, commit_count
-        )
+        find_owned_commits(
+            repo,
+            branch_info.tip_oid,
+            merge_base_oid,
+            &info.branches,
+            branch_name,
+        )?
     };
-    confirm_or_bail(skip_confirm, &prompt)?;
+
+    let scope = match colocated_branch {
+        Some(keep) => {
+            // find_owned_commits hides a sibling at the same tip, so a keeper
+            // always means this drop removes nothing.
+            debug_assert!(is_woven || owned.is_empty());
+            DropScope::KeptBy(&keep.name)
+        }
+        // A woven drop removes the weave section, not everything down to the
+        // merge-base: a branch based on an integration commit shares that
+        // commit with the integration line, which survives. No section means
+        // the weave does not know this branch — refuse before prompting,
+        // since the drop cannot go through either.
+        None if is_woven => match graph.branch_drop_size(branch_name) {
+            Some(n) => DropScope::Commits(n),
+            None => bail!(
+                "Cannot drop branch: '{}' not found in weave graph",
+                branch_name
+            ),
+        },
+        None => DropScope::Commits(owned.len()),
+    };
+    confirm_or_bail(skip_confirm, &drop_prompt(branch_name, &scope))?;
 
     if is_woven {
         let removed = if let Some(keep) = colocated_branch {
@@ -326,7 +340,7 @@ fn drop_branch(repo: &Repository, branch_name: &str, skip_confirm: bool) -> Resu
     } else if owned.is_empty() {
         // Co-located non-woven: no commits to drop, just delete the ref
         git::branch_delete(workdir, branch_name)?;
-        msg::success(&format!("Dropped branch `{}`", branch_name));
+        msg::success(&dropped_message(branch_name, &scope));
         return Ok(());
     } else {
         // Non-woven branch: drop each uniquely owned commit individually
@@ -351,8 +365,58 @@ fn drop_branch(repo: &Repository, branch_name: &str, skip_confirm: bool) -> Resu
         ));
     }
 
-    msg::success(&format!("Dropped branch `{}`", branch_name));
+    msg::success(&dropped_message(branch_name, &scope));
     Ok(())
+}
+
+/// What a branch drop takes with it.
+enum DropScope<'a> {
+    /// Commits removed from history.
+    Commits(usize),
+    /// Nothing removed: a co-located sibling at the same tip keeps them.
+    KeptBy(&'a str),
+    /// Nothing to remove: the branch sits at the merge-base.
+    Empty,
+}
+
+/// `1 commit` or `<n> commits`.
+fn commits_phrase(count: usize) -> String {
+    format!("{} commit{}", count, if count == 1 { "" } else { "s" })
+}
+
+/// Confirmation prompt saying how much the drop removes.
+fn drop_prompt(branch_name: &str, scope: &DropScope) -> String {
+    match scope {
+        DropScope::KeptBy(keep) => format!(
+            "Drop branch `{}`, keeping its commits on `{}`?",
+            branch_name, keep
+        ),
+        // An empty branch is dropped without confirmation, so `Empty` only
+        // reaches here if that ever changes.
+        DropScope::Empty | DropScope::Commits(0) => format!("Drop branch `{}`?", branch_name),
+        DropScope::Commits(n) => format!(
+            "Drop branch `{}` and its {}?",
+            branch_name,
+            commits_phrase(*n)
+        ),
+    }
+}
+
+/// Success message saying how much the drop removed.
+fn dropped_message(branch_name: &str, scope: &DropScope) -> String {
+    match scope {
+        DropScope::Empty => format!("Dropped empty branch `{}`", branch_name),
+        DropScope::KeptBy(keep) => format!(
+            "Dropped branch `{}`, its commits stay on `{}`",
+            branch_name, keep
+        ),
+        DropScope::Commits(0) => format!("Dropped branch `{}`", branch_name),
+        DropScope::Commits(n) => format!(
+            "Dropped branch `{}` and its {}",
+            branch_name,
+            commits_phrase(*n)
+        ),
+    }
 }
 
 /// Find all commits owned by a branch (from tip to next boundary or merge-base).

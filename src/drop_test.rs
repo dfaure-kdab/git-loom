@@ -245,6 +245,60 @@ fn drop_branch_at_merge_base_just_deletes_ref() {
 }
 
 #[test]
+fn messages_state_how_many_commits_go_with_the_branch() {
+    use super::DropScope::Commits;
+    assert_eq!(
+        super::drop_prompt("feat", &Commits(1)),
+        "Drop branch `feat` and its 1 commit?"
+    );
+    assert_eq!(
+        super::drop_prompt("feat", &Commits(3)),
+        "Drop branch `feat` and its 3 commits?"
+    );
+    assert_eq!(
+        super::dropped_message("feat", &Commits(3)),
+        "Dropped branch `feat` and its 3 commits"
+    );
+}
+
+#[test]
+fn the_empty_branch_message_says_it_was_empty() {
+    assert_eq!(
+        super::dropped_message("feat", &super::DropScope::Empty),
+        "Dropped empty branch `feat`"
+    );
+}
+
+/// With nothing removed, neither message claims a number.
+#[test]
+fn messages_claim_no_count_when_nothing_is_removed() {
+    use super::DropScope::Commits;
+    assert_eq!(
+        super::drop_prompt("feat", &Commits(0)),
+        "Drop branch `feat`?"
+    );
+    assert_eq!(
+        super::dropped_message("feat", &Commits(0)),
+        "Dropped branch `feat`"
+    );
+}
+
+/// A co-located drop removes no commit, so both messages name the sibling
+/// keeping them instead of a count.
+#[test]
+fn messages_name_the_sibling_that_keeps_the_commits() {
+    use super::DropScope::KeptBy;
+    assert_eq!(
+        super::drop_prompt("feat", &KeptBy("sibling")),
+        "Drop branch `feat`, keeping its commits on `sibling`?"
+    );
+    assert_eq!(
+        super::dropped_message("feat", &KeptBy("sibling")),
+        "Dropped branch `feat`, its commits stay on `sibling`"
+    );
+}
+
+#[test]
 fn drop_non_woven_branch_removes_commits_and_ref() {
     let test_repo = TestRepo::new_with_remote();
     let base_oid = test_repo.find_remote_branch_target("origin/main");

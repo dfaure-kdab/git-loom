@@ -52,12 +52,24 @@ repository rather than leaving resumable state.
 
 | Case | Required behavior |
 | --- | --- |
-| Tip equals merge-base | Delete only the ref. Do not rebase or require a clean working tree. |
+| Tip equals merge-base | Delete only the ref, without confirmation: it has no commit to lose. Do not rebase or require a clean working tree. Print `Dropped empty branch <name>`. |
 | Woven (tip is off the first-parent line) | Remove its section and merge entry, drop its owned commits, update affected refs, then delete its ref atomically. |
 | Non-woven (tip is on the first-parent line) | Drop its owned commits from the integration line and delete its ref. |
 | Co-located woven | Preserve shared commits and merge topology, assign the section to the first surviving sibling in branch order, and delete only the target ref. |
 | Co-located non-woven | Preserve shared commits and delete only the target ref. |
 | Inner/stacked | Refuse before confirmation because removing it would rewrite the outer branch. |
+
+Confirmation and success must both state how much is removed, so `-y` users
+still learn the size of the drop. The count is the branch's own commits, not
+everything between its tip and the merge-base: for a woven branch its weave
+section, minus the part an inner branch keeps and commits the integration line
+picks too. The merge entry the drop also removes is not counted. With a zero count, say neither a number nor a sibling:
+`Drop branch <name>?` and `Dropped branch <name>`. Messages:
+`Drop branch <name> and its <n> commits?` and
+`Dropped branch <name> and its <n> commits` (singular `1 commit`). When the
+branch owns no commit of its own, name the sibling keeping them instead, in
+both messages: `Drop branch <name>, keeping its commits on <sibling>?` and
+`Dropped branch <name>, its commits stay on <sibling>`.
 
 A woven or non-woven branch must be between merge-base and `HEAD`. Otherwise
 error `Branch '<name>' is not woven into the integration branch` and hint to
