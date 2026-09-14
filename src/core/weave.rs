@@ -442,9 +442,7 @@ impl Weave {
 
     /// Whether `branch_name` matches a section's branch names or label.
     pub fn has_branch_section(&self, branch_name: &str) -> bool {
-        self.branch_sections
-            .iter()
-            .any(|s| s.branch_names.contains(&branch_name.to_string()) || s.label == branch_name)
+        self.section_index(branch_name).is_some()
     }
 
     /// Label of the section containing `branch_name` as an inner (stacked) ref,
@@ -469,23 +467,59 @@ impl Weave {
             })
     }
 
+    /// Index of the section `branch_name` labels or belongs to.
+    fn section_index(&self, branch_name: &str) -> Option<usize> {
+        self.branch_sections
+            .iter()
+            .position(|s| s.branch_names.iter().any(|n| n == branch_name) || s.label == branch_name)
+    }
+
+    /// Position of the last commit carrying a branch ref. Everything at or
+    /// below it stays when the section is dropped.
+    fn inner_branch_boundary(&self, idx: usize) -> Option<usize> {
+        self.branch_sections[idx]
+            .commits
+            .iter()
+            .rposition(|c| !c.update_refs.is_empty())
+    }
+
+    /// How many commits [`Self::drop_branch`] would remove from history: the
+    /// section, minus the part an inner branch keeps, and minus commits the
+    /// integration line picks too — a branch based on an integration commit
+    /// carries it in its section, but it survives the drop. None if no section
+    /// matches.
+    pub fn branch_drop_size(&self, branch_name: &str) -> Option<usize> {
+        let idx = self.section_index(branch_name)?;
+        let kept = self
+            .inner_branch_boundary(idx)
+            .map_or(0, |boundary| boundary + 1);
+        let on_integration_line: HashSet<Oid> = self
+            .integration_line
+            .iter()
+            .filter_map(|e| match e {
+                IntegrationEntry::Pick(c) => Some(c.oid),
+                IntegrationEntry::Merge { .. } => None,
+            })
+            .collect();
+        Some(
+            self.branch_sections[idx].commits[kept..]
+                .iter()
+                .filter(|c| !on_integration_line.contains(&c.oid))
+                .count(),
+        )
+    }
+
     /// Remove an entire branch section and its merge entry. False if no section
     /// matches.
     #[must_use]
     pub fn drop_branch(&mut self, branch_name: &str) -> bool {
-        let Some(idx) = self.branch_sections.iter().position(|s| {
-            s.branch_names.contains(&branch_name.to_string()) || s.label == branch_name
-        }) else {
+        let Some(idx) = self.section_index(branch_name) else {
             return false;
         };
 
         let old_label = self.branch_sections[idx].label.clone();
 
-        // An inner branch in a stacked topology marks its tip in update_refs.
-        let inner_branch_boundary = self.branch_sections[idx]
-            .commits
-            .iter()
-            .rposition(|c| !c.update_refs.is_empty());
+        let inner_branch_boundary = self.inner_branch_boundary(idx);
 
         if let Some(boundary) = inner_branch_boundary {
             // Commits after the inner boundary belong to the dropped branch.

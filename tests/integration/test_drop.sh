@@ -151,10 +151,29 @@ switch_to integration
 weave_branch "g-woven-drop"
 out=$(gl drop g-woven-drop --yes)
 assert_exit_ok $? "drop_woven_ok"
+assert_contains "$out" "and its 2 commits"   "drop_woven_count_msg"
 assert_branch_not_exists "g-woven-drop"      "drop_woven_ref_gone"
 assert_log_not_contains  "Woven A1"          "drop_woven_a1_gone"
 assert_log_not_contains  "Woven A2"          "drop_woven_a2_gone"
 assert_log_not_contains  "Merge g-woven-drop" "drop_woven_merge_gone"
+
+# The branch is based on an integration commit, which the weave keeps: the
+# count must be the section size, not everything down to the merge-base.
+describe "drop woven branch counts only the commits it removes"
+setup_repo_with_remote
+commit_file "Integration C1" "int1.txt"
+git -C "$WORK" branch g-based-on-int HEAD
+switch_to g-based-on-int
+commit_file "Based A1" "ba1.txt"
+commit_file "Based A2" "ba2.txt"
+switch_to integration
+weave_branch "g-based-on-int"
+out=$(gl drop g-based-on-int --yes)
+assert_exit_ok $? "drop_based_on_int_ok"
+assert_contains "$out" "and its 2 commits" "drop_based_on_int_count_msg"
+assert_log_contains     "Integration C1" "drop_based_on_int_kept"
+assert_log_not_contains "Based A1"       "drop_based_on_int_a1_gone"
+assert_log_not_contains "Based A2"       "drop_based_on_int_a2_gone"
 
 describe "drop woven branch preserves commits on other branches"
 setup_repo_with_remote
@@ -217,6 +236,7 @@ switch_to integration
 git -C "$WORK" merge -q --ff-only g-nonwoven
 out=$(gl drop g-nonwoven --yes)
 assert_exit_ok $? "drop_nonwoven_ok"
+assert_contains "$out" "and its 2 commits" "drop_nonwoven_count_msg"
 assert_branch_not_exists "g-nonwoven"   "drop_nonwoven_ref_gone"
 assert_log_not_contains  "Non-woven X"  "drop_nonwoven_x_gone"
 assert_log_not_contains  "Non-woven Y"  "drop_nonwoven_y_gone"
@@ -233,6 +253,7 @@ git -C "$WORK" branch h-coloc-b g-coloc-a
 weave_branch "g-coloc-a"
 out=$(gl drop g-coloc-a --yes)
 assert_exit_ok $? "drop_coloc_woven_ok"
+assert_contains "$out" "its commits stay on h-coloc-b" "drop_coloc_woven_keeper_msg"
 assert_branch_not_exists "g-coloc-a"           "drop_coloc_woven_a_gone"
 assert_branch_exists     "h-coloc-b"           "drop_coloc_woven_b_survives"
 assert_log_contains      "Coloc shared commit"  "drop_coloc_woven_commits_preserved"
@@ -247,6 +268,7 @@ git -C "$WORK" branch h-coloc-nw-b g-coloc-nw-a
 git -C "$WORK" merge -q --ff-only g-coloc-nw-a
 out=$(gl drop g-coloc-nw-a --yes)
 assert_exit_ok $? "drop_coloc_nw_ok"
+assert_contains "$out" "its commits stay on h-coloc-nw-b" "drop_coloc_nw_keeper_msg"
 assert_branch_not_exists "g-coloc-nw-a"    "drop_coloc_nw_a_gone"
 assert_branch_exists     "h-coloc-nw-b"    "drop_coloc_nw_b_survives"
 assert_log_contains      "Coloc NW commit" "drop_coloc_nw_commits_preserved"
@@ -260,8 +282,18 @@ create_feature_branch "g-empty-branch"
 write_file "dirty.txt" "not staged"
 out=$(gl drop g-empty-branch --yes)
 assert_exit_ok $? "drop_empty_branch_ok"
+assert_contains "$out" "Dropped empty branch" "drop_empty_branch_msg"
 assert_branch_not_exists "g-empty-branch" "drop_empty_branch_ref_gone"
 assert_file_content "dirty.txt" "not staged" "drop_empty_branch_wt_intact"
+
+# Without -y: no prompt, so it succeeds even with stdin not a terminal
+describe "drop branch at merge-base needs no confirmation"
+setup_repo_with_remote
+create_feature_branch "g-empty-noconfirm"
+out=$(gl drop g-empty-noconfirm < /dev/null)
+assert_exit_ok $? "drop_empty_noconfirm_ok"
+assert_contains "$out" "Dropped empty branch" "drop_empty_noconfirm_msg"
+assert_branch_not_exists "g-empty-noconfirm" "drop_empty_noconfirm_ref_gone"
 
 # ── DROP BRANCH OUT OF INTEGRATION RANGE ──────────────────────────────────────
 

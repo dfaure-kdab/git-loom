@@ -45,9 +45,26 @@ git loom drop feature-a
 
 Removes the entire branch in a single operation:
 
-- All commits owned by the branch are removed
+- Commits the branch owns are removed; a commit the integration line also carries stays
 - The merge topology is unwoven (if the branch was woven)
 - The branch ref is deleted
+
+The result says how many commits went with the branch, so a `-y` drop reports
+its size too:
+
+```bash
+git loom drop feature-a
+# Drop branch `feature-a` and its 3 commits? (y/n)
+# ✓ Dropped branch `feature-a` and its 3 commits
+```
+
+An **empty branch** (tip at the merge-base) is deleted without a prompt — it has
+no commit to lose:
+
+```bash
+git loom drop feature-b
+# ✓ Dropped empty branch `feature-b`
+```
 
 **Co-located branches** (sharing the same tip commit with another branch): only the branch ref is deleted. Commits are preserved for the surviving sibling branch, and the merge topology is reassigned.
 
@@ -135,8 +152,8 @@ git loom drop zz
 
 ```bash
 git loom drop feature-a
-# Removes feature-a ref, reassigns section to sibling branch
-# Commits preserved for the surviving branch
+# Drop branch `feature-a`, keeping its commits on `feature-b`? (y/n)
+# ✓ Dropped branch `feature-a`, its commits stay on `feature-b`
 ```
 
 ## Conflicts
