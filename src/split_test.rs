@@ -1,3 +1,4 @@
+use crate::core::hunk_select::HunkArgs;
 use crate::core::test_helpers::TestRepo;
 
 // ── HEAD split tests ──────────────────────────────────────────────────
@@ -459,7 +460,7 @@ fn split_with_editor_stamps_the_first_half_and_keeps_the_second() {
         &test_repo.repo,
         &target_oid.to_string(),
         None,
-        false,
+        None,
         vec!["file_a.txt".to_string()],
         &crate::core::graph::Theme::dark(),
     )
@@ -471,4 +472,56 @@ fn split_with_editor_stamps_the_first_half_and_keeps_the_second() {
             .starts_with("First part by editor\n\nChange-Id: I")
     );
     assert_eq!(change_id_at(&test_repo, 0).as_deref(), Some(CHANGE_ID));
+}
+
+// ── Replay hint ───────────────────────────────────────────────────────
+
+fn hint(message: Option<&str>, patch: bool, hunks: HunkArgs, files: &[&str]) -> String {
+    let files: Vec<String> = files.iter().map(|f| f.to_string()).collect();
+    super::invocation("ab", message, patch, &hunks, &files)
+}
+
+#[test]
+fn hint_keeps_the_message_it_was_given() {
+    assert_eq!(
+        hint(Some("fix the thing"), false, HunkArgs::default(), &[]),
+        "loom split ab -m 'fix the thing'"
+    );
+}
+
+/// The placeholder belongs only to the prompt asking for a message.
+#[test]
+fn hint_without_a_message_asks_for_one() {
+    assert_eq!(
+        hint(None, true, HunkArgs::default(), &[]),
+        "loom split ab -m <message> -p"
+    );
+}
+
+#[test]
+fn hint_quotes_a_path_with_a_space() {
+    assert_eq!(
+        hint(Some("m"), true, HunkArgs::default(), &["with space.txt"]),
+        "loom split ab -m m -p 'with space.txt'"
+    );
+}
+
+/// Every argument the agent is told to re-run has to survive a shell,
+/// `--hunks-from` included.
+#[test]
+fn hint_quotes_every_selection_argument() {
+    let hunks = HunkArgs::new(
+        vec!["a,b.txt:1".to_string(), "plain.txt:2".to_string()],
+        Some("; echo pwned".to_string()),
+    );
+    assert_eq!(
+        hint(Some("m"), true, hunks, &[]),
+        "loom split ab -m m -p --hunks 'a,b.txt:1' --hunks 'plain.txt:2' --hunks-from '; echo pwned'"
+    );
+}
+
+#[test]
+fn hint_omits_the_selection_when_none_was_given() {
+    let hunks = HunkArgs::new(vec![], Some("abc123".to_string()));
+    assert_eq!(hint(Some("m"), true, hunks, &[]), "loom split ab -m m -p");
 }

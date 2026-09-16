@@ -185,6 +185,11 @@ commit_sid_from_status() {
 # Usage: branch_sid=$(branch_sid_from_status "branch-name")
 branch_sid_from_status() { gl status | grep -F "[$1]" | awk '{print $(NF-1)}'; }
 
+# A patch, proof against the user's diff config: `diff.external` replaces it
+# wholesale and `color.diff` paints it (both in tests/hostile.gitconfig).
+show_patch()        { git -C "$WORK" show --no-ext-diff --no-color "$@"; }
+diff_patch()        { git -C "$WORK" diff --no-ext-diff --no-color "$@"; }
+
 # ── Assertions ────────────────────────────────────────────────────────────
 
 assert_contains() {

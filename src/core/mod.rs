@@ -2,6 +2,7 @@ pub mod agent_mode;
 pub mod changeid;
 pub mod diff;
 pub mod graph;
+pub mod hunk_select;
 pub mod msg;
 pub mod repo;
 pub mod shortid;
