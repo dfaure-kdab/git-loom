@@ -128,6 +128,22 @@ pub fn apply_cached_patch_reverse(workdir: &Path, patch: &str) -> Result<()> {
     apply_patch_with_flags(workdir, patch, &["--cached", "--reverse"])
 }
 
+/// Apply a patch to the working tree and the index at once
+/// (`git apply --index`).
+///
+/// Not apply-then-`git add`: `git add` refuses a path an ignore rule matches,
+/// even one the patch has just written back, so a file that was committed and
+/// later gitignored could not be staged again.
+pub fn apply_patch_with_index(workdir: &Path, patch: &str) -> Result<()> {
+    apply_patch_with_flags(workdir, patch, &["--index"])
+}
+
+/// Reverse-apply a patch from the working tree and the index
+/// (`git apply --index --reverse`); see [`apply_patch_with_index`].
+pub fn apply_patch_with_index_reverse(workdir: &Path, patch: &str) -> Result<()> {
+    apply_patch_with_flags(workdir, patch, &["--index", "--reverse"])
+}
+
 fn apply_patch_with_flags(workdir: &Path, patch: &str, flags: &[&str]) -> Result<()> {
     run_apply(workdir, patch, &[], flags, None)
 }

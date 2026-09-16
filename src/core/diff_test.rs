@@ -109,3 +109,34 @@ fn parse_hunks_sql_comment_lines() {
         "SQL comment line starting with '-- ' must be tracked as a modified line"
     );
 }
+
+/// A placeholder in the body would corrupt its own entry and swallow the next
+/// file's header.
+#[test]
+fn build_hunk_patch_leaves_out_a_placeholder() {
+    let hunks = vec![
+        super::DiffHunk {
+            text: "(file deleted)".to_string(),
+            modified_lines: vec![],
+        },
+        super::DiffHunk {
+            text: "@@ -1 +1 @@\n-a\n+b\n".to_string(),
+            modified_lines: vec![],
+        },
+    ];
+    assert_eq!(
+        super::build_hunk_patch("f.txt", &hunks),
+        "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-a\n+b\n"
+    );
+}
+
+/// Headers with no body are still non-empty, so a caller testing
+/// `!patch.is_empty()` would hand `git apply` a fragment it rejects.
+#[test]
+fn build_hunk_patch_is_empty_when_nothing_survives() {
+    let hunks = vec![super::DiffHunk {
+        text: "(file deleted)".to_string(),
+        modified_lines: vec![],
+    }];
+    assert_eq!(super::build_hunk_patch("f.txt", &hunks), "");
+}

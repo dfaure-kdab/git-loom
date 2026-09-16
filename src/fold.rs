@@ -666,6 +666,7 @@ fn run_patch_fold(repo: &Repository, args: &[String], theme: &graph::Theme) -> R
                     workdir,
                     &source_hash,
                     &target_hash,
+                    target_arg,
                     theme,
                 );
             }
@@ -709,22 +710,22 @@ fn run_patch_fold(repo: &Repository, args: &[String], theme: &graph::Theme) -> R
     fold_files_into_commit(repo, &staged, &commit_hash, true)
 }
 
+/// The selected entries of this file that travel in the hunk patch. A
+/// whole-file label never does: a submodule or a deletion moves as the commit's
+/// own whole-file diff instead (`picked_whole_files`).
+fn selected_hunks(file: &FileEntry) -> impl Iterator<Item = &diff::DiffHunk> {
+    file.hunks
+        .iter()
+        .filter(|h| h.selected && h.hunk.is_text())
+        .map(|h| &h.hunk)
+}
+
 /// Build a unified diff patch from the selected text hunks across all files.
 fn build_selected_patch(selections: &[FileEntry]) -> String {
     let mut patch = String::new();
     for file in selections {
-        if file.binary {
-            continue;
-        }
-        let selected: Vec<_> = file
-            .hunks
-            .iter()
-            .filter(|h| h.selected)
-            .map(|h| &h.hunk)
-            .collect();
-        if !selected.is_empty() {
-            patch.push_str(&diff::build_hunk_patch(&file.path, &selected));
-        }
+        let selected: Vec<_> = selected_hunks(file).collect();
+        patch.push_str(&diff::build_hunk_patch(&file.path, &selected));
     }
     patch
 }
@@ -756,48 +757,70 @@ fn apply_and_amend_path(
     git::commit_amend_no_edit(workdir)
 }
 
-/// A submodule a `-p` selection picked, carried by the commit's own diff.
-struct PickedGitlink {
-    path: String,
-    /// The commit's whole-file diff for it, which carries the 160000 mode that
-    /// [`diff::build_hunk_patch`] cannot write into a hunk patch.
-    diff: String,
-    /// Whether the commit removes the entry; see [`keep_submodule_removal`].
-    removed: bool,
+/// How a whole-file pick has to be applied.
+enum WholeFileKind {
+    /// A submodule: index only, so the 160000 entry never reaches the working
+    /// tree. `removed` says whether the commit drops it; see
+    /// [`keep_submodule_removal`].
+    Gitlink { removed: bool },
+    /// A file the commit deletes: working tree and index, like a hunk.
+    Deletion,
 }
 
-/// The submodules a `-p` selection picked, with the diffs that can move them.
-fn picked_gitlinks(
+/// A file a `-p` selection picked whole, carried by the commit's own diff.
+struct PickedWholeFile {
+    path: String,
+    /// The commit's whole-file diff for it, carrying what
+    /// [`diff::build_hunk_patch`] cannot write into a hunk patch: the 160000
+    /// mode of a submodule, or the `deleted file mode` of a deletion.
+    diff: String,
+    kind: WholeFileKind,
+}
+
+/// The files a `-p` selection picked whole, with the diffs that can move them.
+///
+/// `selections` must be `collect_commit_hunks`' entries for `commit`: it is
+/// what puts the commit's own name-status in `index_status`, where `'D'` names
+/// a deletion rather than a staged one.
+fn picked_whole_files(
     workdir: &Path,
     commit: &str,
     selections: &[FileEntry],
-) -> Result<Vec<PickedGitlink>> {
+) -> Result<Vec<PickedWholeFile>> {
     let gitlinks = git::commit_gitlinks(workdir, commit)?;
     let mut picked = Vec::new();
     for file in selections {
-        if let Some(&removed) = gitlinks.get(&file.path)
-            && file.hunks.iter().any(|h| h.selected)
-        {
-            picked.push(PickedGitlink {
-                path: file.path.clone(),
-                diff: git::diff_commit_file(workdir, commit, &file.path)?,
-                removed,
-            });
+        if !file.hunks.iter().any(|h| h.selected) {
+            continue;
         }
+        let kind = if let Some(&removed) = gitlinks.get(&file.path) {
+            WholeFileKind::Gitlink { removed }
+        } else if file.index_status == 'D' {
+            WholeFileKind::Deletion
+        } else {
+            continue;
+        };
+        picked.push(PickedWholeFile {
+            path: file.path.clone(),
+            diff: git::diff_commit_file(workdir, commit, &file.path)?,
+            kind,
+        });
     }
     Ok(picked)
 }
 
 /// At a rebase edit pause: apply (or reverse-apply) patch, stage affected files, amend.
 ///
-/// Picked submodules go to the index instead of being staged by path: `git add`
-/// on one stages whatever its checkout currently holds, which is not what the
-/// commit this selection came from recorded.
+/// A picked submodule goes to the index instead of being staged by path:
+/// `git add` on one stages whatever its checkout currently holds, which is not
+/// what the commit this selection came from recorded. A picked deletion goes to
+/// both at once: reversed it writes the file back, forward it removes it, and
+/// `--index` stages either way without `git add`'s ignore rules.
 fn apply_and_amend(
     workdir: &Path,
     selections: &[FileEntry],
     patch: &str,
-    gitlinks: &[PickedGitlink],
+    whole_files: &[PickedWholeFile],
     reverse: bool,
 ) -> Result<()> {
     if !patch.is_empty() {
@@ -807,19 +830,100 @@ fn apply_and_amend(
             git::apply_patch(workdir, patch)?;
         }
     }
-    for gitlink in gitlinks {
-        if reverse {
-            git::apply_cached_patch_reverse(workdir, &gitlink.diff)?;
-        } else {
-            git::apply_cached_patch(workdir, &gitlink.diff)?;
+    for whole in whole_files {
+        match whole.kind {
+            WholeFileKind::Gitlink { .. } => {
+                if reverse {
+                    git::apply_cached_patch_reverse(workdir, &whole.diff)?;
+                } else {
+                    git::apply_cached_patch(workdir, &whole.diff)?;
+                }
+            }
+            WholeFileKind::Deletion => {
+                if reverse {
+                    git::apply_patch_with_index_reverse(workdir, &whole.diff)?;
+                } else {
+                    git::apply_patch_with_index(workdir, &whole.diff)?;
+                }
+            }
         }
     }
     for file in selections {
-        if file.hunks.iter().any(|h| h.selected) && !gitlinks.iter().any(|g| g.path == file.path) {
+        if selected_hunks(file).next().is_some() && !is_whole_file(whole_files, &file.path) {
             git::stage_path(workdir, &file.path)?;
         }
     }
     git::commit_amend_no_edit(workdir)
+}
+
+fn is_whole_file(whole_files: &[PickedWholeFile], path: &str) -> bool {
+    whole_files.iter().any(|w| w.path == path)
+}
+
+/// Put the selection back in the working tree, unstaged.
+///
+/// A picked deletion is not in `patch` — it travels as its own whole-file diff
+/// — so it is removed from disk here, over the index entry the amend restored,
+/// which is what an unstaged deletion is.
+fn restore_to_worktree(workdir: &Path, patch: &str, whole_files: &[PickedWholeFile]) -> Result<()> {
+    if !patch.is_empty() {
+        git::apply_patch_to_worktree(workdir, patch)?;
+    }
+    for whole in whole_files {
+        if matches!(whole.kind, WholeFileKind::Deletion) {
+            git::apply_patch_to_worktree(workdir, &whole.diff)?;
+        }
+    }
+    Ok(())
+}
+
+/// The picked files `-p` will leave behind: every entry selected for them is a
+/// whole-file label, and no whole-file diff carries them either.
+fn unmovable_picks<'a>(
+    selections: &'a [FileEntry],
+    whole_files: &[PickedWholeFile],
+) -> Vec<&'a str> {
+    selections
+        .iter()
+        .filter(|f| {
+            f.hunks.iter().any(|h| h.selected)
+                && selected_hunks(f).next().is_none()
+                && !is_whole_file(whole_files, &f.path)
+        })
+        .map(|f| f.path.as_str())
+        .collect()
+}
+
+/// Says which files stayed put and how to move one whole instead.
+///
+/// Names where the id comes from rather than building one: a `CommitFile` id
+/// resolves only through the short-ID allocator, so neither the hash nor the
+/// revision the caller typed would work in its place.
+fn unmovable_warning(left: &[&str], destination: &str) -> String {
+    format!(
+        "Left behind, no hunk to move: {}\n\
+         To move one whole, take its `<commit>:<index>` id from `loom status -f` \
+         and run `loom fold <id> {destination}`",
+        left.join(", ")
+    )
+}
+
+/// The patch `fold -p` will apply, refusing a selection with no hunk in it and
+/// naming any picked file left behind rather than dropping it in silence.
+fn build_movable_patch(
+    selections: &[FileEntry],
+    whole_files: &[PickedWholeFile],
+    destination: &str,
+) -> Result<String> {
+    let patch = build_selected_patch(selections);
+    if patch.is_empty() && whole_files.is_empty() {
+        bail!("No text hunks selected — binary files are not supported with -p");
+    }
+    let left = unmovable_picks(selections, whole_files);
+    if !left.is_empty() {
+        msg::warn(&unmovable_warning(&left, destination));
+    }
+    Ok(patch)
 }
 
 /// Pick hunks from `source_hash` to move into `target_hash`.
@@ -831,6 +935,7 @@ fn run_patch_fold_commit_to_commit(
     workdir: &Path,
     source_hash: &str,
     target_hash: &str,
+    target_arg: &str,
     theme: &graph::Theme,
 ) -> Result<()> {
     let source_oid = git2::Oid::from_str(source_hash)?;
@@ -846,8 +951,14 @@ fn run_patch_fold_commit_to_commit(
     let selections = staging::run_commit_hunk_picker(workdir, source_hash, &[], theme)?
         .ok_or_else(msg::cancelled)?;
 
-    let (new_source_hash, new_target_hash) =
-        fold_selected_hunks_to_commit(repo, workdir, source_hash, target_hash, &selections)?;
+    let (new_source_hash, new_target_hash) = fold_selected_hunks_to_commit(
+        repo,
+        workdir,
+        source_hash,
+        target_hash,
+        target_arg,
+        &selections,
+    )?;
 
     msg::success(&format!(
         "Moved hunk(s) from `{}` (now `{}`) into `{}` (now `{}`)",
@@ -863,11 +974,16 @@ fn run_patch_fold_commit_to_commit(
 /// The rest of [`run_patch_fold_commit_to_commit`], once the hunks are picked;
 /// split off so tests can supply `selections` without the picker. Returns the
 /// hashes the source and the target ended up with.
+///
+/// `target_arg` is what the user typed for the target, which the left-behind
+/// warning echoes: a short ID or a branch name still resolves once this rebase
+/// has rewritten the hash, unlike the hash itself.
 fn fold_selected_hunks_to_commit(
     repo: &Repository,
     workdir: &Path,
     source_hash: &str,
     target_hash: &str,
+    target_arg: &str,
     selections: &[FileEntry],
 ) -> Result<(String, String)> {
     let source_oid = git2::Oid::from_str(source_hash)?;
@@ -879,12 +995,9 @@ fn fold_selected_hunks_to_commit(
         bail!("No hunks selected");
     }
 
-    let gitlinks = picked_gitlinks(workdir, source_hash, selections)?;
+    let whole_files = picked_whole_files(workdir, source_hash, selections)?;
 
-    let selected_patch = build_selected_patch(selections);
-    if selected_patch.is_empty() && gitlinks.is_empty() {
-        bail!("No text hunks selected — binary and deleted files are not supported with -p");
-    }
+    let selected_patch = build_movable_patch(selections, &whole_files, target_arg)?;
 
     let saved_head = repo::head_oid(repo)?.to_string();
     let saved_refs = repo::snapshot_branch_refs(repo)?;
@@ -912,7 +1025,7 @@ fn fold_selected_hunks_to_commit(
         return Err(e);
     }
 
-    if let Err(e) = apply_and_amend(workdir, selections, &selected_patch, &gitlinks, true) {
+    if let Err(e) = apply_and_amend(workdir, selections, &selected_patch, &whole_files, true) {
         return Err(git::rebase_abort_then_cleanup(workdir, e, || {
             let _ = git::branch_delete(workdir, TRACK_BRANCH);
             let _ = git::restore_staged_patch(workdir, &saved_staged);
@@ -974,7 +1087,7 @@ fn fold_selected_hunks_to_commit(
         return Err(e);
     }
 
-    if let Err(e) = apply_and_amend(workdir, selections, &selected_patch, &gitlinks, false) {
+    if let Err(e) = apply_and_amend(workdir, selections, &selected_patch, &whole_files, false) {
         return Err(git::rebase_abort_then_cleanup(workdir, e, rollback));
     }
 
@@ -1027,12 +1140,9 @@ fn run_patch_fold_commit_to_unstaged(
         bail!("No hunks selected");
     }
 
-    let gitlinks = picked_gitlinks(workdir, commit_hash, &selections)?;
+    let whole_files = picked_whole_files(workdir, commit_hash, &selections)?;
 
-    let selected_patch = build_selected_patch(&selections);
-    if selected_patch.is_empty() && gitlinks.is_empty() {
-        bail!("No text hunks selected — binary and deleted files are not supported with -p");
-    }
+    let selected_patch = build_movable_patch(&selections, &whole_files, "zz")?;
 
     let head_oid = repo::head_oid(repo)?;
     let target_oid = git2::Oid::from_str(commit_hash)?;
@@ -1050,14 +1160,12 @@ fn run_patch_fold_commit_to_unstaged(
         let pre_amend_hash = head_oid.to_string();
         // Same rollback as below: a failure part-way through leaves the hunks
         // reverse-applied in the working tree, and `saved_staged` unstaged.
-        if let Err(e) = apply_and_amend(workdir, &selections, &selected_patch, &gitlinks, true) {
+        if let Err(e) = apply_and_amend(workdir, &selections, &selected_patch, &whole_files, true) {
             rollback_fold(workdir, &pre_amend_hash, None, &saved_worktree);
             return Err(e).context("Failed to remove hunks from the commit, operation rolled back");
         }
         new_hash = git::rev_parse(workdir, "HEAD")?;
-        if !selected_patch.is_empty()
-            && let Err(e) = git::apply_patch_to_worktree(workdir, &selected_patch)
-        {
+        if let Err(e) = restore_to_worktree(workdir, &selected_patch, &whole_files) {
             // The snapshot predates `save_and_unstage_staged`, so the rollback
             // puts `saved_staged` back along with the rest.
             rollback_fold(workdir, &pre_amend_hash, None, &saved_worktree);
@@ -1082,7 +1190,7 @@ fn run_patch_fold_commit_to_unstaged(
             return Err(e);
         }
 
-        if let Err(e) = apply_and_amend(workdir, &selections, &selected_patch, &gitlinks, true) {
+        if let Err(e) = apply_and_amend(workdir, &selections, &selected_patch, &whole_files, true) {
             return Err(git::rebase_abort_then_cleanup(workdir, e, || {
                 let _ = git::restore_staged_patch(workdir, &saved_staged);
             }));
@@ -1095,9 +1203,7 @@ fn run_patch_fold_commit_to_unstaged(
             }));
         }
 
-        if !selected_patch.is_empty()
-            && let Err(e) = git::apply_patch_to_worktree(workdir, &selected_patch)
-        {
+        if let Err(e) = restore_to_worktree(workdir, &selected_patch, &whole_files) {
             rollback_fold(workdir, &saved_head, Some(&saved_refs), &saved_worktree);
             return Err(e)
                 .context("Failed to apply changes to working directory, operation rolled back");
@@ -1106,10 +1212,11 @@ fn run_patch_fold_commit_to_unstaged(
 
     git::restore_staged_patch(workdir, &saved_staged)?;
 
-    let mut staged: Vec<String> = gitlinks
+    let mut staged: Vec<String> = whole_files
         .iter()
-        .filter(|g| g.removed && keep_submodule_removal(workdir, &g.path))
-        .map(|g| g.path.clone())
+        .filter(|w| matches!(w.kind, WholeFileKind::Gitlink { removed: true }))
+        .filter(|w| keep_submodule_removal(workdir, &w.path))
+        .map(|w| w.path.clone())
         .collect();
     staged.sort();
 

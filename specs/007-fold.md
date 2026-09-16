@@ -167,9 +167,9 @@ git-loom fold -p <source> <target>
 
 When both resolve to commits, show source's commit diff. Source and target must differ, and source must be a newer descendant; otherwise error exactly `Source commit must be newer than target commit`. Remove selected hunks from source and add them to target, preserving messages, topology, and unselected hunks while rewriting affected hashes.
 
-Binary/deleted files cannot supply patch hunks. If no text selection is possible, error exactly `No text hunks selected — binary and deleted files are not supported with -p`.
+A binary file cannot supply patch hunks. If no text selection is possible, error exactly `No text hunks selected — binary files are not supported with -p`. The picker still offers one, so a selection mixing it with a real hunk proceeds on the hunks alone: warn which files stay behind before touching history, and name the `CommitFile → Commit` form as the way to move one whole. The warning names the target as the user spelled it, never its hash, which this rebase rewrites.
 
-A submodule is one whole entry in the picker, taken or left entire. It travels as the commit's own whole-file diff, applied with `--cached`: a picked hunk carries no file mode and would land the entry as a plain blob. `split -p` does the same (Spec 013).
+A submodule and a deleted file are each one whole entry in the picker, taken or left entire, and travel as the commit's own whole-file diff because a hunk patch carries neither the 160000 mode nor `deleted file mode`. A submodule's applies with `--cached`, or the entry lands as a plain blob, which is what `split -p` does too (Spec 013). A deletion's applies to the working tree and the index at once (`git apply --index`), both ways round: reversed it writes the file back, forward it removes it. Never staged by path afterwards: `git add` refuses a path an ignore rule matches, including one the apply just wrote back.
 
 This move uses two edit-and-continue phases: first remove hunks from source, then add them to target. Target's new OID is unknown until phase one, so `_loom-track` carries its pre-phase-one OID into phase two; phase two replays the source in turn, so `_loom-track` then follows the source, whose post-phase-one OID is stale by the end.
 
@@ -179,9 +179,9 @@ This move uses two edit-and-continue phases: first remove hunks from source, the
 git-loom fold -p <commit> zz
 ```
 
-Show the commit diff, remove selected text hunks while preserving the commit/message and unselected hunks, and apply the selection as unstaged worktree changes. Rewrite non-HEAD descendants and preserve other worktree changes. Binary/deleted files use the same exact error as above.
+Show the commit diff, remove selected text hunks while preserving the commit/message and unselected hunks, and apply the selection as unstaged worktree changes. A picked deletion lands unstaged too: the amend restores the index entry, then the file goes off disk. Rewrite non-HEAD descendants and preserve other worktree changes. Binary files use the same exact error as above.
 
-Unlike a captured whole-file diff, a hunk selection carries no blob IDs and cannot use three-way replay. If selected lines or context no longer match, re-apply hard-fails and rolls back the whole operation.
+Unlike a captured whole-file diff, a hunk selection carries no blob IDs and cannot use three-way replay; a whole-file entry moving beside it does carry them, so the working-tree re-apply of one can fall back to three-way. The amends themselves apply plainly, either way. If selected lines or context no longer match, re-apply hard-fails and rolls back the whole operation.
 
 ### Patch safety
 
