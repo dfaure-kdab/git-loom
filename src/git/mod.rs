@@ -29,9 +29,10 @@ pub use git_merge::{MergeOutcome, continue_merge, merge_abort, merge_is_in_progr
 #[cfg(test)]
 pub use git_rebase::rebase_onto;
 pub use git_rebase::{
-    RebaseOutcome, abort_after_failure, auto_merge_id, continue_rebase,
-    continue_rebase_expecting_edit, has_unmerged_paths, rebase, rebase_abort,
-    rebase_abort_then_cleanup, rebase_is_in_progress, rebase_outcome, rebase_progress,
+    AfterStop, RebaseOutcome, abort_after_failure, auto_merge_id, continue_rebase,
+    continue_rebase_expecting_edit, finished_without_stopping, has_unmerged_paths, rebase,
+    rebase_abort, rebase_abort_then_cleanup, rebase_is_in_progress, rebase_outcome,
+    rebase_progress, skip_empty_stops, verify_paused_at,
 };
 pub use git_worktree::ensure_not_checked_out_elsewhere;
 
@@ -86,8 +87,9 @@ pub const FORCED_CONFIG: &[&str] = &[
 pub const ABORT_FAILED_CAUSE: &str =
     "a stale `.git/index.lock` or a concurrent git process is the usual cause";
 
-/// Minimum Git version required (--update-refs was added in 2.38).
-const MIN_GIT_VERSION: (u32, u32) = (2, 38);
+/// Minimum Git version required (`merge-tree --merge-base`, which decides
+/// whether a commit replays empty, was added in 2.40; `--update-refs` in 2.38).
+const MIN_GIT_VERSION: (u32, u32) = (2, 40);
 
 /// Absolute path of the git dir for `workdir`.
 ///
@@ -151,8 +153,10 @@ pub fn run_git_combined(workdir: &Path, args: &[&str]) -> Result<String> {
 
 /// Check that the installed Git version meets the minimum requirement.
 pub fn check_git_version() -> Result<()> {
-    let output = Command::new("git").arg("--version").output()?;
-    let version_str = String::from_utf8_lossy(&output.stdout);
+    let version_str = git_version_output();
+    if version_str.is_empty() {
+        bail!("Could not run git — is it installed and on PATH?");
+    }
 
     // Parse "git version X.Y.Z..." → (X, Y)
     let (major, minor) = parse_git_version(&version_str)
@@ -160,7 +164,7 @@ pub fn check_git_version() -> Result<()> {
 
     if (major, minor) < MIN_GIT_VERSION {
         bail!(
-            "Git {}.{} is too old, git-loom requires Git {}.{} or later (for --update-refs)\n\
+            "Git {}.{} is too old, git-loom requires Git {}.{} or later\n\
              Current version: {}",
             major,
             minor,
@@ -171,6 +175,39 @@ pub fn check_git_version() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// git's `--empty` value that halts on a commit whose replay came out empty.
+///
+/// Spelled `ask` before Git 2.45, which renamed it `stop` and kept the old
+/// spelling working with a deprecation warning.
+pub fn empty_stop_value() -> &'static str {
+    static VALUE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    VALUE.get_or_init(|| empty_stop_for(parse_git_version(&git_version_output())))
+}
+
+/// `git --version`, asked once per run.
+fn git_version_output() -> String {
+    static OUTPUT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    OUTPUT
+        .get_or_init(|| {
+            Command::new("git")
+                .arg("--version")
+                .output()
+                .ok()
+                .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+                .unwrap_or_default()
+        })
+        .clone()
+}
+
+/// `ask` is the spelling both understand, so an unreadable version falls back
+/// to it rather than to one an older git rejects outright.
+fn empty_stop_for(version: Option<(u32, u32)>) -> &'static str {
+    match version {
+        Some(version) if version >= (2, 45) => "stop",
+        _ => "ask",
+    }
 }
 
 /// Parse "git version X.Y.Z..." into (major, minor).

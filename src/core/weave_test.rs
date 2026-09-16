@@ -908,7 +908,11 @@ fn edit_commit_changes_command() {
         base_refs: vec![],
     };
 
-    graph.edit_commit(oid(OID_C1));
+    assert!(graph.edit_commit(oid(OID_C1)));
+    assert!(
+        !graph.edit_commit(oid("9999999999999999999999999999999999999999")),
+        "a commit outside the graph cannot be marked"
+    );
 
     if let IntegrationEntry::Pick(c) = &graph.integration_line[0] {
         assert_eq!(c.command, Command::Edit);
@@ -1592,7 +1596,7 @@ fn run_rebase_or_abort_rejects_a_paused_rebase() {
 
     // The edit-driving wrapper takes the same rebase as success.
     assert!(
-        super::run_rebase_expecting_edit(&workdir, Some(&base.to_string()), &todo).is_ok(),
+        super::run_rebase_expecting_edit(&workdir, Some(&base.to_string()), &todo, c1, &[]).is_ok(),
         "a caller that drives the `edit` itself expects the pause"
     );
     assert!(crate::git::rebase_is_in_progress(&git_dir));
@@ -2115,4 +2119,47 @@ fn move_commit_above_a_colocated_tip_advances_every_branch() {
         "a branch move splits instead, leaving feature-b at A1"
     );
     assert_ne!(by_anchor.to_todo(), by_branch.to_todo());
+}
+
+/// `Weave::edit_commit` marks nothing for a commit outside the graph, and a
+/// rebase that never stops leaves the caller rewriting the branch tip — with no
+/// rebase left to abort. So the todo is checked before the rebase starts.
+#[test]
+fn an_edit_rebase_refuses_a_commit_the_todo_never_marks() {
+    use crate::core::test_helpers::TestRepo;
+
+    let test_repo = TestRepo::new();
+    let base = test_repo.commit("base", "base.txt");
+    let c1 = test_repo.commit("first", "a.txt");
+    let workdir = test_repo.workdir();
+    let git_dir = test_repo.repo.path().to_path_buf();
+
+    let todo = format!("label onto\n\nreset onto\npick {c1}\n");
+    let err = super::run_rebase_expecting_edit(&workdir, Some(&base.to_string()), &todo, c1, &[])
+        .expect_err("a todo with no `edit` for the target must be refused");
+
+    assert!(!crate::git::rebase_is_in_progress(&git_dir), "{err}");
+    assert_eq!(test_repo.head_oid(), c1, "{err}");
+}
+
+#[test]
+fn ensure_todo_edits_wants_an_edit_line_for_the_target() {
+    fn check(todo: &str, oid: git2::Oid) -> anyhow::Result<()> {
+        super::ensure_todo_edits(&super::edited_commits(todo), oid)
+    }
+
+    let oid = git2::Oid::from_str("4783c1b06566c35e8d1cbc020936813639cd0ea4").unwrap();
+    let other = git2::Oid::from_str("cd46c622e4881bed2ae786285fab0b14a7271f13").unwrap();
+
+    // The todo carries short hashes; a full one works too.
+    assert!(check("reset onto\nedit 4783c1b # msg\n", oid).is_ok());
+    assert!(check(&format!("edit {oid} # msg\n"), oid).is_ok());
+
+    assert!(check("", oid).is_err());
+    assert!(check("reset onto\npick 4783c1b # msg\n", oid).is_err());
+    assert!(check("edit cd46c62 # other\n", oid).is_err());
+    // `core.abbrev` can go down to 4, and git keeps it unambiguous.
+    assert!(check("edit 4783 # msg\n", oid).is_ok());
+    assert!(check("edit \n", oid).is_err());
+    assert!(check(&format!("edit {other} # other\n"), oid).is_err());
 }

@@ -954,8 +954,15 @@ impl Weave {
         )
     }
 
-    pub fn edit_commit(&mut self, oid: Oid) {
-        self.set_command(oid, Command::Edit);
+    /// Mark `oid` for an `edit` stop, reporting whether it is in the graph at
+    /// all. Ignoring a `false` is only safe when the same commit is passed as
+    /// `expect_stop` to `run_rebase_expecting_edit`, whose `ensure_todo_edits`
+    /// refuses in its place — and does so through the same error path as a
+    /// failed rebase, so the caller's rollback still runs. A second `edit` in
+    /// one todo has no such backstop.
+    #[must_use]
+    pub fn edit_commit(&mut self, oid: Oid) -> bool {
+        self.set_command(oid, Command::Edit)
     }
 
     pub fn add_branch_section(
@@ -1186,12 +1193,12 @@ impl Weave {
         }
     }
 
-    fn set_command(&mut self, oid: Oid, command: Command) {
+    fn set_command(&mut self, oid: Oid, command: Command) -> bool {
         for section in &mut self.branch_sections {
             for commit in &mut section.commits {
                 if commit.oid == oid {
                     commit.command = command;
-                    return;
+                    return true;
                 }
             }
         }
@@ -1201,9 +1208,10 @@ impl Weave {
                 && commit.oid == oid
             {
                 commit.command = command;
-                return;
+                return true;
             }
         }
+        false
     }
 }
 
@@ -1436,9 +1444,17 @@ struct BranchCommitEntry {
 /// weave when there is one and a minimal linear todo otherwise.
 pub fn start_edit_rebase(repo: &Repository, workdir: &Path, commit_oid: Oid) -> Result<()> {
     if let Ok(mut graph) = Weave::from_repo(repo) {
-        graph.edit_commit(commit_oid);
+        if !graph.edit_commit(commit_oid) {
+            return Err(not_in_the_weave(commit_oid));
+        }
         let todo = graph.to_todo();
-        return run_rebase_expecting_edit(workdir, Some(&graph.base_oid.to_string()), &todo);
+        return run_rebase_expecting_edit(
+            workdir,
+            Some(&graph.base_oid.to_string()),
+            &todo,
+            commit_oid,
+            &[],
+        );
     }
 
     build_and_run_linear_edit(repo, workdir, commit_oid)
@@ -1500,7 +1516,7 @@ fn build_and_run_linear_edit(repo: &Repository, workdir: &Path, commit_oid: Oid)
         todo.push('\n');
     }
 
-    run_rebase_expecting_edit(workdir, upstream.as_deref(), &todo)
+    run_rebase_expecting_edit(workdir, upstream.as_deref(), &todo, commit_oid, &[])
 }
 
 pub use crate::git::RebaseOutcome;
@@ -1525,18 +1541,84 @@ pub fn run_rebase_or_abort(
 /// Execute a weave-based rebase whose todo this caller filled with `edit`
 /// steps, aborting automatically if it stops for any other reason.
 ///
-/// Stopping at the first `edit` is the point of the call, so `Paused` is
-/// success. The caller drives the rebase from there and finishes it with
-/// [`git::continue_rebase_expecting_edit`].
+/// Stopping at the replay of `expect_stop` is the point of the call, and the
+/// commits this todo marks `edit` are protected from being dropped as empty;
+/// `also_protect` adds ones a later phase depends on. The caller drives the
+/// rebase from there and finishes it with
+/// [`git::continue_rebase_expecting_edit`]. Any other outcome — a stop on
+/// another commit, a rebase that never stopped — is refused before the caller
+/// rewrites anything (see [`git::verify_paused_at`]).
 pub fn run_rebase_expecting_edit(
     workdir: &Path,
     upstream: Option<&str>,
     todo_content: &str,
+    expect_stop: Oid,
+    also_protect: &[&str],
 ) -> Result<()> {
-    match run_rebase(workdir, upstream, todo_content)? {
-        RebaseOutcome::Completed | RebaseOutcome::Paused => Ok(()),
+    let mut protected = edited_commits(todo_content);
+    ensure_todo_edits(&protected, expect_stop)?;
+    let expected = expect_stop.to_string();
+
+    protected.extend(also_protect.iter().map(|hash| hash.to_string()));
+
+    // Halt on a commit that replays empty instead of letting git drop it, and
+    // protect every commit this todo rewrites — a second `edit` in the same
+    // rebase is as much the caller's as the one it stops at first.
+    let git_dir = git::absolute_git_dir(workdir)?;
+    let outcome = git::skip_empty_stops(
+        workdir,
+        &git_dir,
+        &protected,
+        run_rebase_with_empty(workdir, upstream, todo_content, git::empty_stop_value())?,
+    )?;
+
+    match outcome {
+        RebaseOutcome::Paused => git::verify_paused_at(workdir, &expected),
+        RebaseOutcome::Completed => Err(git::finished_without_stopping(&expected)),
         RebaseOutcome::Stopped => Err(git::abort_after_failure(workdir)),
     }
+}
+
+/// The commits a todo marks `edit` — the ones a caller drives and must not
+/// lose — as abbreviated as the todo spells them.
+fn edited_commits(todo_content: &str) -> Vec<String> {
+    todo_content
+        .lines()
+        .filter_map(|line| line.strip_prefix("edit "))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Refuse before the rebase starts if the todo carries no `edit` for
+/// `expect_stop`.
+///
+/// A commit outside the graph — an upstream commit, a stale SHA, a branch loom
+/// does not manage — leaves the todo with nothing to stop at, and the rebase
+/// runs to the end with no stop to verify. `Weave::edit_commit` reports that
+/// directly; this reads the todo text because `build_and_run_linear_edit`
+/// hand-builds one without a graph.
+fn ensure_todo_edits(edited: &[String], expect_stop: Oid) -> Result<()> {
+    let full = expect_stop.to_string();
+    // Whatever length `core.abbrev` gives the todo, git chose it to be
+    // unambiguous in this repository, so a shared prefix is this commit.
+    let marked = edited
+        .iter()
+        .any(|hash| !hash.is_empty() && full.starts_with(hash.as_str()));
+
+    if marked {
+        return Ok(());
+    }
+    Err(not_in_the_weave(expect_stop))
+}
+
+/// The target is not among the commits a rewrite can reach.
+pub fn not_in_the_weave(oid: Oid) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Commit `{}` is not one of the commits loom rewrites — nothing was rewritten\n\
+         If history moved, the SHA may be stale — run `loom` to see the current commits",
+        git::short_hash(&oid.to_string())
+    )
 }
 
 /// Execute a weave-based rebase, writing the todo to a temp file and running
@@ -1546,11 +1628,23 @@ pub fn run_rebase_expecting_edit(
 /// — so commits after it up to HEAD are rebased; `None` means `--root`.
 ///
 /// Returns `Paused` when it stopped at an `edit` the todo asked for and
-/// `Stopped` when it stopped part-way. Does NOT abort.
+/// `Stopped` when it stopped part-way. Does NOT abort. A commit whose changes
+/// the new base already has is dropped by the sequencer.
 pub fn run_rebase(
     workdir: &Path,
     upstream: Option<&str>,
     todo_content: &str,
+) -> Result<RebaseOutcome> {
+    run_rebase_with_empty(workdir, upstream, todo_content, "drop")
+}
+
+/// [`run_rebase`] with git's `--empty` mode chosen: `stop` reports a commit
+/// that replayed empty instead of dropping it (see [`git::skip_empty_stops`]).
+fn run_rebase_with_empty(
+    workdir: &Path,
+    upstream: Option<&str>,
+    todo_content: &str,
+    empty: &str,
 ) -> Result<RebaseOutcome> {
     use std::io::Write;
     use std::process::Command;
@@ -1585,9 +1679,9 @@ pub fn run_rebase(
     );
 
     let upstream_arg = upstream.unwrap_or("--root");
+    let empty_arg = format!("--empty={empty}");
     let log_args = format!(
-        "rebase --interactive --autostash --keep-empty --empty=drop --no-autosquash --rebase-merges --update-refs {}",
-        upstream_arg
+        "rebase --interactive --autostash --keep-empty {empty_arg} --no-autosquash --rebase-merges --update-refs {upstream_arg}"
     );
 
     let mut cmd = Command::new("git");
@@ -1598,7 +1692,7 @@ pub fn run_rebase(
             "--interactive",
             "--autostash",
             "--keep-empty",
-            "--empty=drop",
+            &empty_arg,
             "--no-autosquash",
             "--rebase-merges",
             "--update-refs",

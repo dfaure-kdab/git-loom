@@ -483,3 +483,91 @@ fn reword_without_conflict_leaves_no_state() {
         "a clean reword must clear its state file"
     );
 }
+
+#[test]
+fn reword_refuses_when_the_replay_is_dropped() {
+    // git drops a commit whose changes the base already has, yet still honors
+    // its `edit` line and stops on the commit below — rewording there would
+    // rewrite that one and lose the target.
+    let (t, target) = crate::core::test_helpers::repo_with_dropped_replay();
+    let head_before = t.head_oid();
+    let alpha_before = t.get_branch_target("alpha");
+
+    let err = super::reword_commit(
+        &t.repo,
+        &target.to_string(),
+        Some("New message".to_string()),
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("replays empty"), "{err}");
+    assert_eq!(t.head_oid(), head_before, "{err}");
+    assert_eq!(t.get_branch_target("alpha"), alpha_before, "{err}");
+    assert!(!crate::git::rebase_is_in_progress(t.repo.path()), "{err}");
+}
+
+#[test]
+fn reword_refuses_when_the_upstream_cherry_picked_the_target() {
+    // A cherry-pick upstream keeps the author and message, so the commit the
+    // rebase stops on looks exactly like the target: only git reporting the
+    // empty replay gives the drop away.
+    let (t, target) = crate::core::test_helpers::repo_with_cherry_picked_replay();
+    let head_before = t.head_oid();
+    let alpha_before = t.get_branch_target("alpha");
+
+    let err = super::reword_commit(
+        &t.repo,
+        &target.to_string(),
+        Some("New message".to_string()),
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("replays empty"), "{err}");
+    assert_eq!(t.head_oid(), head_before, "{err}");
+    assert_eq!(t.get_branch_target("alpha"), alpha_before, "{err}");
+    assert!(!crate::git::rebase_is_in_progress(t.repo.path()), "{err}");
+}
+
+#[test]
+fn reword_gets_past_a_redundant_commit_below_the_target() {
+    // Only the commit being rewritten has to survive the replay: one below it
+    // whose changes are already upstream is dropped, as it always was, and the
+    // reword goes through.
+    let (t, keeper) = crate::core::test_helpers::repo_with_a_redundant_commit_below();
+
+    super::reword_commit(&t.repo, &keeper.to_string(), Some("Reworded".to_string())).unwrap();
+
+    assert_eq!(t.branch_commit_summary("alpha"), "Reworded");
+    assert!(!t.commit_messages().contains(&"branch change".to_string()));
+    assert!(!crate::git::rebase_is_in_progress(t.repo.path()));
+}
+
+#[test]
+fn reword_gets_past_a_redundant_commit_above_the_target() {
+    // The rebase meets the redundant commit after the amend, on the `continue`
+    // rather than the first run — a stop there is not a conflict either.
+    let (t, keeper) = crate::core::test_helpers::repo_with_a_redundant_commit_above();
+
+    super::reword_commit(&t.repo, &keeper.to_string(), Some("Reworded".to_string())).unwrap();
+
+    assert!(t.commit_messages().contains(&"Reworded".to_string()));
+    assert!(!t.commit_messages().contains(&"branch change".to_string()));
+    assert!(!crate::git::rebase_is_in_progress(t.repo.path()));
+    assert!(!t.repo.path().join("loom").join("state.json").exists());
+}
+
+#[test]
+fn reword_works_with_a_short_core_abbrev() {
+    // `core.abbrev` decides how long the hashes in a rebase todo are; matching
+    // them must not assume a minimum length.
+    let t = TestRepo::new_with_remote();
+    t.set_config("core.abbrev", "4");
+    let c1 = t.commit("First commit", "file1.txt");
+    t.commit("Second commit", "file2.txt");
+
+    super::reword_commit(&t.repo, &c1.to_string(), Some("Reworded".to_string())).unwrap();
+
+    assert_eq!(t.get_message(1), "Reworded");
+}

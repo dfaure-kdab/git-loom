@@ -345,3 +345,214 @@ fn rebase_outcome_classifies_all_four_cases() {
         RebaseOutcome::Stopped
     );
 }
+
+#[test]
+fn verify_paused_at_refuses_a_stop_on_another_commit() {
+    let test_repo = TestRepo::new();
+    let base = test_repo.commit("base", "base.txt");
+    let c1 = test_repo.commit("first", "a.txt");
+    let c2 = test_repo.commit("second", "b.txt");
+    let workdir = test_repo.workdir();
+    let git_dir = test_repo.repo.path().to_path_buf();
+
+    let todo = format!("label onto\n\nreset onto\nedit {c1}\npick {c2}\n");
+    weave::run_rebase(&workdir, Some(&base.to_string()), &todo).unwrap();
+    assert!(crate::git::rebase_is_in_progress(&git_dir));
+
+    // HEAD is the replay of c1, so verifying it against c2 must refuse.
+    let err = crate::git::verify_paused_at(&workdir, &c2.to_string())
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("was not replayed"), "{err}");
+    assert!(!crate::git::rebase_is_in_progress(&git_dir), "{err}");
+}
+
+/// Author and message alone cannot tell a commit from its cherry-picked
+/// duplicate, which is exactly the history this whole check exists for.
+#[test]
+fn verify_paused_at_refuses_a_stop_on_a_commit_of_the_same_identity() {
+    let test_repo = TestRepo::new();
+    let base = test_repo.commit("base", "base.txt");
+    let c1 = test_repo.commit_at("dup", "a.txt", 1_000);
+    let c2 = test_repo.commit_at("dup", "b.txt", 1_000);
+    let workdir = test_repo.workdir();
+    let git_dir = test_repo.repo.path().to_path_buf();
+
+    let todo = format!("label onto\n\nreset onto\nedit {c1}\nedit {c2}\n");
+    weave::run_rebase(&workdir, Some(&base.to_string()), &todo).unwrap();
+    assert!(crate::git::rebase_is_in_progress(&git_dir));
+
+    let err = crate::git::verify_paused_at(&workdir, &c2.to_string())
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("was not replayed"), "{err}");
+    assert!(!crate::git::rebase_is_in_progress(&git_dir), "{err}");
+}
+
+/// `git rebase --skip` is a hard reset, so a stop that only looks empty must
+/// never be skipped over work done while the rebase was paused.
+#[test]
+fn an_empty_stop_is_not_skipped_over_local_changes() {
+    let test_repo = TestRepo::new();
+    let main = test_repo.current_branch_name();
+    test_repo.write_file("other.txt", "keep\n");
+    test_repo.write_file("shared.txt", "start\n");
+    test_repo.stage_files(&["other.txt", "shared.txt"]);
+    test_repo.commit_staged("start");
+
+    test_repo.create_branch("side");
+    test_repo.switch_branch("side");
+    test_repo.write_file("shared.txt", "final\n");
+    test_repo.stage_files(&["shared.txt"]);
+    test_repo.commit_staged("side change");
+
+    // The same content reaches the other line in two steps, so no patch-id
+    // matches and the emptiness only shows when `side` is replayed onto it.
+    test_repo.switch_branch(&main);
+    test_repo.write_file("shared.txt", "middle\n");
+    test_repo.stage_files(&["shared.txt"]);
+    test_repo.commit_staged("upstream step one");
+    test_repo.write_file("shared.txt", "final\n");
+    test_repo.stage_files(&["shared.txt"]);
+    test_repo.commit_staged("upstream step two");
+
+    let workdir = test_repo.workdir();
+    let git_dir = test_repo.repo.path().to_path_buf();
+    let empty = format!("--empty={}", crate::git::empty_stop_value());
+    let _ = crate::git::run_git(&workdir, &["rebase", &empty, "HEAD", "side"]);
+    assert!(crate::git::rebase_is_in_progress(&git_dir));
+
+    test_repo.write_file("other.txt", "edited while paused\n");
+
+    let outcome =
+        crate::git::skip_empty_stops(&workdir, &git_dir, &[], crate::git::RebaseOutcome::Stopped)
+            .unwrap();
+
+    assert_eq!(outcome, crate::git::RebaseOutcome::Stopped);
+    assert_eq!(test_repo.read_file("other.txt"), "edited while paused\n");
+    crate::git::rebase_abort(&workdir).unwrap();
+}
+
+/// The replay of a commit never keeps its hash, so the check has to recognize
+/// it by what a rebase does preserve.
+#[test]
+fn verify_paused_at_accepts_a_replay_with_a_new_hash() {
+    let test_repo = TestRepo::new();
+    let base = test_repo.commit("base", "base.txt");
+    let target = test_repo.commit("target", "target.txt");
+
+    test_repo.reset_hard(base);
+    let onto = test_repo.commit("upstream", "upstream.txt");
+
+    let workdir = test_repo.workdir();
+    let git_dir = test_repo.repo.path().to_path_buf();
+    let todo = format!("label onto\n\nreset onto\nedit {target}\n");
+    weave::run_rebase(&workdir, Some(&onto.to_string()), &todo).unwrap();
+
+    assert!(crate::git::rebase_is_in_progress(&git_dir));
+    assert_ne!(test_repo.head_oid(), target);
+
+    crate::git::verify_paused_at(&workdir, &target.to_string()).unwrap();
+    crate::git::rebase_abort(&workdir).unwrap();
+}
+
+/// The discriminator behind the skip: `git rebase --skip` is a hard reset, so
+/// it runs only for a commit the repository says would add nothing.
+#[test]
+fn replays_empty_only_when_the_content_is_already_there() {
+    let test_repo = TestRepo::new();
+    let main = test_repo.current_branch_name();
+    test_repo.write_file("shared.txt", "start\n");
+    test_repo.stage_files(&["shared.txt"]);
+    test_repo.commit_staged("start");
+
+    test_repo.create_branch("side");
+    test_repo.switch_branch("side");
+    test_repo.write_file("shared.txt", "side\n");
+    test_repo.stage_files(&["shared.txt"]);
+    test_repo.commit_staged("side change");
+    let side_change = test_repo.head_oid().to_string();
+
+    let workdir = test_repo.workdir();
+    test_repo.switch_branch(&main);
+    assert!(!super::replays_empty(&workdir, &side_change));
+
+    // The same content, reached independently: now it would add nothing.
+    test_repo.write_file("shared.txt", "side\n");
+    test_repo.stage_files(&["shared.txt"]);
+    test_repo.commit_staged("same content, other commit");
+    assert!(super::replays_empty(&workdir, &side_change));
+}
+
+/// Upstream taking the change *and* editing around it is the common shape, and
+/// the replay is still empty — asking which files the commit touched would say
+/// otherwise.
+#[test]
+fn replays_empty_when_the_upstream_also_changed_the_same_file() {
+    let test_repo = TestRepo::new();
+    let main = test_repo.current_branch_name();
+    test_repo.write_file("f.txt", "1\n2\n3\n");
+    test_repo.stage_files(&["f.txt"]);
+    test_repo.commit_staged("base");
+
+    test_repo.create_branch("side");
+    test_repo.switch_branch("side");
+    test_repo.write_file("f.txt", "1\n2\nX\n3\n");
+    test_repo.stage_files(&["f.txt"]);
+    test_repo.commit_staged("branch adds X");
+    let side_change = test_repo.head_oid().to_string();
+
+    test_repo.switch_branch(&main);
+    test_repo.write_file("f.txt", "1\n2\nX\n3\n4\n");
+    test_repo.stage_files(&["f.txt"]);
+    test_repo.commit_staged("upstream adds X and 4");
+
+    assert!(super::replays_empty(&test_repo.workdir(), &side_change));
+}
+
+/// Git quotes a non-ASCII path in its plumbing output, so a check built on
+/// path lists read it back as "nothing to compare" — i.e. as empty.
+#[test]
+fn a_commit_touching_a_non_ascii_path_does_not_look_empty() {
+    let test_repo = TestRepo::new();
+    let main = test_repo.current_branch_name();
+    test_repo.write_file("base.txt", "base\n");
+    test_repo.stage_files(&["base.txt"]);
+    test_repo.commit_staged("base");
+
+    test_repo.create_branch("side");
+    test_repo.switch_branch("side");
+    test_repo.write_file("café.txt", "content\n");
+    test_repo.stage_files(&["café.txt"]);
+    test_repo.commit_staged("add an accented path");
+    let side_change = test_repo.head_oid().to_string();
+
+    let workdir = test_repo.workdir();
+    test_repo.switch_branch(&main);
+    assert!(!super::replays_empty(&workdir, &side_change));
+}
+
+/// A submodule's own worktree is not the superproject's to lose: autostash
+/// never stashes it, so counting it would leave the guard permanently on and
+/// every empty stop deadlocked.
+#[test]
+fn a_dirty_submodule_is_not_a_local_change() {
+    let test_repo = crate::core::test_helpers::TestRepo::new();
+    let (first, second) = test_repo.add_submodule("sub");
+    test_repo.commit_staged("Add submodule");
+    let workdir = test_repo.workdir();
+    assert!(!super::has_local_changes(&workdir));
+
+    // Dirty inside the submodule only: the superproject has nothing to stash.
+    test_repo.write_file("sub/dirty.txt", "dirty\n");
+    crate::git::run_git(&workdir.join("sub"), &["add", "dirty.txt"]).unwrap();
+    assert!(!super::has_local_changes(&workdir));
+
+    // A gitlink the index does move is still a change a `--skip` would eat.
+    test_repo.checkout_submodule("sub", second);
+    test_repo.stage_files(&["sub"]);
+    assert!(super::has_local_changes(&workdir));
+    let _ = first;
+}

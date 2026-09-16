@@ -73,6 +73,12 @@ Conflict policy belongs to the caller:
 - Resumable owners (`update`, `commit`, `absorb`, `drop commit`, `swap`, `branch merge`, supported `reword` replay, and simple supported `fold` paths) return `Stopped`, save `.git/loom/state.json`, and allow `loom continue` or `loom abort`.
 - Out-of-scope paths (including `split`, excluded `fold` paths, and non-pausing reword failures) explicitly abort and restore the original repository. Reword's supported replay conflict is governed by Spec 003.
 
+A rebase carrying `edit` steps MUST halt on a commit that replays empty (`--empty=stop`, spelled `ask` before Git 2.45). Under `--empty=drop` Git discards a commit whose changes the new base already has while still honoring its `edit` line, stopping on the commit below, and the caller rewrites that one and loses the target.
+
+At such a halt loom MUST refuse if the emptied commit is one it is rewriting — every commit the todo marks `edit`, plus any a later phase depends on — and otherwise drop it, reporting it, and carry on. This applies to `continue` as well: `--empty` outlives `git rebase --continue`, and a halt there is not a conflict.
+
+A pause MUST still be verified before anything is rewritten: the commit git recorded for the stop (`stopped-sha`) MUST be the one marked `Edit`, falling back to author and message where git recorded none, the replayed hash being new. A failed verification MUST abort the rebase, restore, and rewrite nothing. A todo that marks no `edit` for the requested commit MUST fail before the rebase starts: once it completes there is nothing left to abort.
+
 | Command | Graph operations |
 | --- | --- |
 | branch (Spec 005) | weave branch |

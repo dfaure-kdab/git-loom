@@ -325,3 +325,30 @@ fn split_by_hunks_takes_a_submodule_from_the_commit() {
     assert_eq!(test_repo.get_message(1), "first");
     assert_eq!(test_repo.get_message(0), "second");
 }
+
+#[test]
+fn split_refuses_when_the_replay_is_dropped() {
+    // Same dropped-commit stop as reword, but split's `reset --mixed HEAD~1`
+    // would destroy the commit below the target instead of amending it.
+    let (t, target) = crate::core::test_helpers::repo_with_dropped_replay();
+    let head_before = t.head_oid();
+    let base_before = t.find_remote_branch_target("origin/main");
+
+    let err = super::split_commit_with_selection(
+        &t.repo,
+        &target.to_string(),
+        vec!["one.txt".to_string()],
+        "First part".to_string(),
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("replays empty"), "{err}");
+    assert_eq!(t.head_oid(), head_before, "{err}");
+    assert_eq!(
+        t.find_remote_branch_target("origin/main"),
+        base_before,
+        "{err}"
+    );
+    assert!(!crate::git::rebase_is_in_progress(t.repo.path()), "{err}");
+}
