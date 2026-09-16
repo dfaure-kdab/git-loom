@@ -94,6 +94,8 @@ git loom fold -p ab
 # Selected hunks are staged and folded into commit ab
 ```
 
+A picked binary or deleted file is staged whole here, the way [`split -p`](split.md) does.
+
 Provide file arguments before the target to narrow the picker:
 
 ```bash
@@ -109,7 +111,14 @@ git loom fold -p c2 c1
 # Selected hunks are removed from c2 and added to c1
 ```
 
-The source (`c2`) must be newer than the target (`c1`). Binary and deleted files are not supported; a submodule moves whole.
+The source (`c2`) must be newer than the target (`c1`). A submodule or a deleted file moves whole. Binary files are not supported: picking one alongside real hunks folds the hunks and leaves it where it is, warning before it rewrites anything:
+
+```
+! Left behind, no hunk to move: logo.png
+  › To move one whole, take its `<commit>:<index>` id from `loom status -f` and run `loom fold <id> c1`
+```
+
+Form 3 below leaves a binary file behind the same way; a picked deletion comes back as an unstaged deletion.
 
 **Form 3 — pick hunks from a commit → uncommit to working tree:**
 

@@ -1,3 +1,6 @@
+/// What every real hunk starts with, and no whole-file placeholder does.
+const HUNK_HEADER: &str = "@@ -";
+
 /// A single hunk extracted from a unified diff.
 #[derive(Clone, Debug)]
 pub(crate) struct DiffHunk {
@@ -6,6 +9,15 @@ pub(crate) struct DiffHunk {
     pub text: String,
     /// Original (pre-image) line numbers of modified/deleted lines in this hunk.
     pub modified_lines: Vec<usize>,
+}
+
+impl DiffHunk {
+    /// Whether this is a real `@@` hunk rather than a whole-file placeholder
+    /// standing in for a deletion, a binary blob, a submodule or an empty file.
+    /// Those are text too, so the `@@` header is what separates them.
+    pub(crate) fn is_text(&self) -> bool {
+        self.text.starts_with(HUNK_HEADER)
+    }
 }
 
 /// Parse a unified diff into individual hunks.
@@ -21,7 +33,7 @@ pub(crate) fn parse_hunks(diff: &str) -> Vec<DiffHunk> {
     let mut in_hunk = false;
 
     for line in diff.lines() {
-        if line.starts_with("@@ -") {
+        if line.starts_with(HUNK_HEADER) {
             // Save previous hunk if any
             if in_hunk {
                 hunks.push(DiffHunk {
@@ -71,23 +83,30 @@ pub(crate) fn parse_hunks(diff: &str) -> Vec<DiffHunk> {
 
 /// Parse a hunk header to extract the starting line number of the original side.
 pub(crate) fn parse_hunk_start(line: &str) -> Option<usize> {
-    let line = line.strip_prefix("@@ -")?;
+    let line = line.strip_prefix(HUNK_HEADER)?;
     let end = line.find([',', ' '])?;
     line[..end].parse().ok()
 }
 
-/// Build a valid unified patch for `git apply` from selected hunks of a single file.
+/// Build a valid unified patch for `git apply` from selected hunks of a single
+/// file, dropping any entry that is not a hunk.
 ///
 /// Produces a patch with one file header (`--- a/` / `+++ b/`) followed by
 /// the raw text of each hunk (which includes the `@@` header).
 ///
 /// Accepts both `&[DiffHunk]` and `&[&DiffHunk]` via `Borrow`.
 pub(crate) fn build_hunk_patch(path: &str, hunks: &[impl std::borrow::Borrow<DiffHunk>]) -> String {
-    let mut patch = String::new();
-    patch.push_str(&format!("--- a/{}\n", path));
-    patch.push_str(&format!("+++ b/{}\n", path));
+    // Dropped, not asserted: a panic here would escape the caller's rollback.
+    // Headers come after, so dropping every hunk yields nothing rather than a
+    // bodiless fragment that a `!patch.is_empty()` caller would still apply.
+    let mut hunks = hunks.iter().map(|h| h.borrow()).filter(|h| h.is_text());
+    let Some(first) = hunks.next() else {
+        return String::new();
+    };
+    let mut patch = format!("--- a/{path}\n+++ b/{path}\n");
+    patch.push_str(&first.text);
     for hunk in hunks {
-        patch.push_str(&hunk.borrow().text);
+        patch.push_str(&hunk.text);
     }
     patch
 }

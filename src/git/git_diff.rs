@@ -56,9 +56,19 @@ pub fn diff_commit(workdir: &Path, oid: &str) -> Result<String> {
 }
 
 /// Get the diff for a single file within a commit
-/// (`git diff <oid>^..<oid> -- <path>`).
+/// (`git diff <oid>^..<oid> -- :(literal)<path>`).
+///
+/// `:(literal)` for the reason [`super::ls_files`] gives: a caller moving this diff
+/// whole would otherwise move whatever else the path matched as a glob.
 pub fn diff_commit_file(workdir: &Path, oid: &str, path: &str) -> Result<String> {
-    diff_stdout(workdir, &[&format!("{}^..{}", oid, oid), "--", path])
+    diff_stdout(
+        workdir,
+        &[
+            &format!("{}^..{}", oid, oid),
+            "--",
+            &format!(":(literal){path}"),
+        ],
+    )
 }
 
 /// Get the whole staged diff, HEAD → index (`git diff --binary --cached`);
