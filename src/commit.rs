@@ -248,16 +248,17 @@ fn resolve_staging_patch(
     theme: &graph::Theme,
 ) -> Result<String> {
     // Save aside other staged files when specific files are targeted.
-    let saved_staged = if !files.is_empty() && !files.iter().any(|f| f == "zz") {
-        let resolved_paths = resolve_file_args(repo, files)?;
-        let path_refs: Vec<&str> = resolved_paths.iter().map(|s| s.as_str()).collect();
-        staging::save_and_unstage_other_staged(repo, workdir, &path_refs)?
-    } else {
-        String::new()
+    let filter = staging::filter_paths(repo, files)?;
+    let saved_staged = match &filter {
+        Some(paths) => {
+            let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+            staging::save_and_unstage_other_staged(repo, workdir, &path_refs)?
+        }
+        None => String::new(),
     };
 
-    let confirmed = staging::run_hunk_picker(repo, workdir, files, theme)?;
-    if !confirmed {
+    let confirmed = staging::run_hunk_picker(repo, workdir, filter.as_deref(), theme)?;
+    if confirmed.is_none() {
         git::restore_staged_patch(workdir, &saved_staged);
         return Err(msg::cancelled());
     }

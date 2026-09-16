@@ -157,7 +157,7 @@ All forms open the interactive hunk picker and require at least one selection; o
 git-loom fold -p [<files>...] <commit>
 ```
 
-Show the current working-tree diff, filtered by optional paths (`zz` means all). Stage only selected hunks and amend them into target. Unselected changes remain unstaged. Rewrite target/descendants; retain messages and unrelated content.
+Show the current working-tree diff, filtered by optional paths (`zz` means all). Stage only selected hunks and amend them into target. Unselected changes remain unstaged. Only paths the picker staged are folded; a path it never listed — outside the filter, or with no hunk to show such as a mode-only change — stays staged. A folded path carries its whole index entry, including a staged change the listing did not show. Rewrite target/descendants; retain messages and unrelated content.
 
 ### Commit hunks into older Commit
 

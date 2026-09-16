@@ -70,8 +70,9 @@ fn run_patch(files: Vec<String>, theme: &graph::Theme) -> Result<()> {
     let repo = repo::open_repo()?;
     let workdir = repo::require_workdir(&repo, "add")?.to_path_buf();
 
-    let confirmed = staging::run_hunk_picker(&repo, &workdir, &files, theme)?;
-    if !confirmed {
+    let filter = staging::filter_paths(&repo, &files)?;
+    let confirmed = staging::run_hunk_picker(&repo, &workdir, filter.as_deref(), theme)?;
+    if confirmed.is_none() {
         return Err(msg::cancelled());
     }
     Ok(())

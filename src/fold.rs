@@ -697,14 +697,16 @@ fn run_patch_fold(repo: &Repository, args: &[String], theme: &graph::Theme) -> R
         _ => unreachable!(),
     };
 
-    let confirmed = staging::run_hunk_picker(repo, workdir, source_args, theme)?;
-    if !confirmed {
-        return Err(msg::cancelled());
-    }
+    // Resolved once, before the picker stages: a short ID names what is changed
+    // now, and staging changes that.
+    let filter = staging::filter_paths(repo, source_args)?;
 
-    let staged = repo::get_staged_files(repo)?;
+    let staged = match staging::run_hunk_picker(repo, workdir, filter.as_deref(), theme)? {
+        Some(paths) => paths,
+        None => return Err(msg::cancelled()),
+    };
     if staged.is_empty() {
-        bail!("Nothing to commit");
+        bail!("No hunks selected");
     }
     fold_files_into_commit(repo, &staged, &commit_hash, true)
 }
