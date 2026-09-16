@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 
+use crate::core::hunk_select::{self, HunkArgs};
 use crate::core::repo::{self, Target, TargetKind};
 use crate::core::staging;
 use crate::core::{graph, msg};
@@ -13,6 +14,7 @@ use crate::git;
 pub fn run(
     files: Vec<String>,
     patch: bool,
+    hunks: HunkArgs,
     git_args: Vec<String>,
     theme: &graph::Theme,
 ) -> Result<()> {
@@ -26,7 +28,7 @@ pub fn run(
                  Files go before the separator: `loom add <files> -- <git args>`"
             );
         }
-        return run_patch(files, theme);
+        return run_patch(files, hunks, theme);
     }
 
     let repo = repo::open_repo()?;
@@ -65,14 +67,28 @@ pub fn run(
     Ok(())
 }
 
-/// Interactive patch mode: collect diffs, launch TUI, apply selected hunks.
-fn run_patch(files: Vec<String>, theme: &graph::Theme) -> Result<()> {
+/// Patch mode: collect diffs, pick hunks (a picker, `--hunks`, or a listing
+/// in agent mode), apply the selection.
+fn run_patch(files: Vec<String>, hunks: HunkArgs, theme: &graph::Theme) -> Result<()> {
     let repo = repo::open_repo()?;
     let workdir = repo::require_workdir(&repo, "add")?.to_path_buf();
 
+    let picker = hunk_select::worktree_picker(
+        hunks,
+        hunk_select::patch_command("loom add", &files),
+        None,
+        &[],
+    );
     let filter = staging::filter_paths(&repo, &files)?;
-    let confirmed = staging::run_hunk_picker(&repo, &workdir, filter.as_deref(), theme)?;
-    if confirmed.is_none() {
+    let picked = staging::run_hunk_picker(
+        &repo,
+        &workdir,
+        filter.as_deref(),
+        &picker,
+        staging::LeftOut::Unstaged,
+        theme,
+    )?;
+    if picked.is_none() {
         return Err(msg::cancelled());
     }
     Ok(())

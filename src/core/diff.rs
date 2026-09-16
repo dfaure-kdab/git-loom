@@ -3,6 +3,7 @@
 pub(crate) const DELETED_ENTRY: &str = "(file deleted)";
 pub(crate) const BINARY_ENTRY: &str = "(binary file)";
 pub(crate) const SUBMODULE_ENTRY: &str = "(submodule)";
+pub(crate) const EMPTY_ENTRY: &str = "(empty file)";
 
 /// What every real hunk starts with, and no whole-file placeholder does.
 const HUNK_HEADER: &str = "@@ -";
@@ -23,6 +24,27 @@ impl DiffHunk {
     /// Those are text too, so the `@@` header is what separates them.
     pub(crate) fn is_text(&self) -> bool {
         self.text.starts_with(HUNK_HEADER)
+    }
+
+    /// Post-image line numbers of the lines this hunk adds; empty for a
+    /// placeholder.
+    pub(crate) fn added_lines(&self) -> Vec<usize> {
+        let mut lines = self.text.lines();
+        let Some(mut line_no) = lines.next().and_then(parse_hunk_new_start) else {
+            return vec![];
+        };
+        let mut added = Vec::new();
+        for line in lines {
+            match line.as_bytes().first() {
+                Some(b'+') => {
+                    added.push(line_no);
+                    line_no += 1;
+                }
+                Some(b'-' | b'\\') => {}
+                _ => line_no += 1,
+            }
+        }
+        added
     }
 }
 
@@ -92,6 +114,14 @@ pub(crate) fn parse_hunk_start(line: &str) -> Option<usize> {
     let line = line.strip_prefix(HUNK_HEADER)?;
     let end = line.find([',', ' '])?;
     line[..end].parse().ok()
+}
+
+/// The starting line number of the new side of a hunk header.
+fn parse_hunk_new_start(line: &str) -> Option<usize> {
+    let line = line.strip_prefix(HUNK_HEADER)?;
+    let new = &line[line.find(" +")? + 2..];
+    let end = new.find([',', ' '])?;
+    new[..end].parse().ok()
 }
 
 /// Build a valid unified patch for `git apply` from selected hunks of a single

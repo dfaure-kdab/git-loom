@@ -100,6 +100,7 @@ pub fn run(
         whole_files: true,
         // Both commits it writes are the one it lists.
         target_hash: None,
+        git_args: String::new(),
     });
 
     match resolved {

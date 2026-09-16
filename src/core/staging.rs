@@ -1,6 +1,7 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use git2::Repository;
 use std::cell::Cell;
+use std::io::Write;
 use std::path::Path;
 
 use crate::core::diff::{self, parse_hunk_start};
@@ -11,21 +12,56 @@ use crate::git;
 use crate::tui::hunk_selector::{FileEntry, HunkEntry, HunkOrigin};
 use crate::tui::theme::TuiTheme;
 
-/// Open the interactive hunk picker for the given files (or all if empty / `zz`).
+/// What becomes of staged work a pick leaves out (Spec 019).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LeftOut {
+    /// `add -p`: unstaging is what an untick means.
+    Unstaged,
+    /// `commit -p`, `fold -p`: out of what they create, but still staged after.
+    KeptStaged,
+}
+
+/// What a picker did to the index (Spec 006).
+pub(crate) struct Picked<'a> {
+    /// The paths it staged: those with a selected hunk.
+    pub paths: Vec<String>,
+    /// The staged work it unstaged because the pick left it out, put back when
+    /// this drops. Empty for `LeftOut::Unstaged`.
+    pub left_out: StagedAside<'a>,
+}
+
+/// Pick working-tree hunks for the given files (or all if empty / `zz`).
 ///
-/// Returns the paths the picker staged — those with a selected hunk — or
-/// `None` if it was cancelled. Never a path the picker did not show (Spec 007).
-pub fn run_hunk_picker(
+/// Returns what the picker staged, or `None` if it was cancelled. Never a path
+/// the picker did not show (Spec 007).
+/// With `picker.hunks` the selection is applied without rendering; in agent
+/// mode without it, the hunks are listed as data instead (spec 019).
+pub fn run_hunk_picker<'a>(
     repo: &Repository,
-    workdir: &Path,
+    workdir: &'a Path,
     filter: Option<&[String]>,
+    picker: &Picker,
+    left_out: LeftOut,
     theme: &graph::Theme,
-) -> Result<Option<Vec<String>>> {
-    let entries = collect_file_entries(repo, workdir, filter)?;
+) -> Result<Option<Picked<'a>>> {
+    let mut entries = collect_file_entries(repo, workdir, filter)?;
 
     if entries.is_empty() {
+        // Only a rendered picker can be cancelled (see `run_commit_hunk_picker`).
+        if agent_mode::enabled() || !picker.hunks.is_empty() {
+            bail!("No changes to stage");
+        }
         msg::warn("No changes to stage");
         return Ok(None);
+    }
+
+    if !picker.hunks.is_empty() {
+        hunk_select::apply("", &mut entries, picker)?;
+        return stage_selection(workdir, &entries, left_out).map(Some);
+    }
+
+    if agent_mode::enabled() {
+        return Err(hunk_select::respond("", entries, picker));
     }
 
     let tui_theme = TuiTheme::from_graph_theme(theme);
@@ -33,14 +69,24 @@ pub fn run_hunk_picker(
 
     match result {
         None => Ok(None),
-        Some(selected_files) => stage_selection(workdir, &selected_files).map(Some),
+        Some(selected_files) => stage_selection(workdir, &selected_files, left_out).map(Some),
     }
 }
 
-/// Stage what a picker kept, returning the paths it staged.
-pub(crate) fn stage_selection(workdir: &Path, files: &[FileEntry]) -> Result<Vec<String>> {
-    apply_selections(workdir, files)?;
-    Ok(selected_paths(files))
+/// Stage what a picker kept.
+pub(crate) fn stage_selection<'a>(
+    workdir: &'a Path,
+    files: &[FileEntry],
+    left_out: LeftOut,
+) -> Result<Picked<'a>> {
+    let patch = apply_selections(workdir, files, left_out)?;
+    Ok(Picked {
+        paths: selected_paths(files),
+        left_out: match left_out {
+            LeftOut::Unstaged => StagedAside::none(workdir),
+            LeftOut::KeptStaged => StagedAside::new(workdir, patch),
+        },
+    })
 }
 
 /// The content `git add` stages for the binary entries of `entries`, which
@@ -181,8 +227,91 @@ pub(crate) fn collect_file_entries(
 }
 
 /// Apply the user's selections: stage selected unstaged hunks, unstage deselected staged hunks.
-pub(crate) fn apply_selections(workdir: &Path, files: &[FileEntry]) -> Result<()> {
+///
+/// All or nothing: a step that fails puts the index back as it was, since the
+/// ones before it may already have unstaged the user's work.
+///
+/// Returns the staged work it unstaged, as a patch that stages it again.
+pub(crate) fn apply_selections(
+    workdir: &Path,
+    files: &[FileEntry],
+    left_out: LeftOut,
+) -> Result<String> {
+    // Kept staged, the left-out work travels as blobs in the returned patch,
+    // so only an unstaging for good can lose it.
+    if left_out == LeftOut::Unstaged {
+        hunk_select::refuse_losing_index_content(files)?;
+    }
+
+    let index = git::git_path(workdir, "index")?;
+    let before = match std::fs::read(&index) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        // Without a copy there is nothing to restore: `None` would delete it.
+        Err(e) => return Err(e).context(format!("Failed to read '{}'", index.display())),
+    };
+    let result = apply_selections_unguarded(workdir, files, left_out);
+    if result.is_err() {
+        restore_index(&index, before.as_deref());
+    }
+    result
+}
+
+/// Put the index file back. Best-effort — the caller is already reporting a
+/// failure — but a miss is said, since the index then is not as it was.
+fn restore_index(index: &Path, before: Option<&[u8]>) {
+    if !put_index_back(index, before) {
+        msg::warn("the index could not be put back as it was: check `git status`");
+    }
+}
+
+/// Write `before` as the index through `index.lock`, git's own protocol: the
+/// lock keeps another writer out, and the rename lands it whole. `None` means
+/// there was no index, so it is removed under the lock instead.
+fn put_index_back(index: &Path, before: Option<&[u8]>) -> bool {
+    let mut lock_name = index.as_os_str().to_owned();
+    lock_name.push(".lock");
+    let lock = std::path::PathBuf::from(lock_name);
+    // Held by someone else: theirs to finish, not ours to remove.
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock)
+    else {
+        return false;
+    };
+    let done = match before {
+        Some(bytes) => {
+            let written = file.write_all(bytes).and_then(|()| file.sync_all()).is_ok();
+            drop(file);
+            written && std::fs::rename(&lock, index).is_ok()
+        }
+        None => {
+            drop(file);
+            match std::fs::remove_file(index) {
+                Ok(()) => true,
+                Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+            }
+        }
+    };
+    if !done || before.is_none() {
+        let _ = std::fs::remove_file(&lock);
+    }
+    done
+}
+
+fn apply_selections_unguarded(
+    workdir: &Path,
+    files: &[FileEntry],
+    left_out: LeftOut,
+) -> Result<String> {
     let mut to_stage_patch = String::new();
+    // Stage hunks of a file that is also being unstaged, in part or whole:
+    // diffed against the index before the unstaging, so they may no longer
+    // apply there.
+    // Never fuzzed: a looser match can land them in the wrong place.
+    let mut to_stage_after_unstage = String::new();
+    let mut paths_after_unstage: Vec<&str> = Vec::new();
     let mut to_unstage_patch = String::new();
     let mut files_to_add: Vec<&str> = Vec::new();
     let mut files_to_unstage: Vec<&str> = Vec::new();
@@ -232,7 +361,13 @@ pub(crate) fn apply_selections(workdir: &Path, files: &[FileEntry]) -> Result<()
         }
 
         if !hunks_to_stage.is_empty() {
-            to_stage_patch.push_str(&diff::build_hunk_patch(&file.path, &hunks_to_stage));
+            let patch = diff::build_hunk_patch(&file.path, &hunks_to_stage);
+            if hunks_to_unstage.is_empty() && !files_to_unstage.contains(&&*file.path) {
+                to_stage_patch.push_str(&patch);
+            } else {
+                to_stage_after_unstage.push_str(&patch);
+                paths_after_unstage.push(&file.path);
+            }
             total_staged += hunks_to_stage.len();
         }
 
@@ -240,6 +375,19 @@ pub(crate) fn apply_selections(workdir: &Path, files: &[FileEntry]) -> Result<()
             files_changed += 1;
         }
     }
+
+    // The index before and after the unstaging differ by exactly what was
+    // left out. Trees rather than the hunks: the diff then carries blob ids,
+    // so putting it back can go three-way, binary files included.
+    // Only when it is kept: `write-tree` refuses an index with unmerged paths,
+    // which need not stop an `add -p` elsewhere.
+    let unstaging = left_out == LeftOut::KeptStaged
+        && (!to_unstage_patch.is_empty() || !files_to_unstage.is_empty());
+    let before_unstage = if unstaging {
+        Some(git::write_tree(workdir)?)
+    } else {
+        None
+    };
 
     // Apply unstaging first (reverse-apply staged hunks that were deselected).
     if !to_unstage_patch.is_empty() {
@@ -250,9 +398,29 @@ pub(crate) fn apply_selections(workdir: &Path, files: &[FileEntry]) -> Result<()
         git::unstage_files(workdir, &files_to_unstage)?;
     }
 
+    let left_out = match &before_unstage {
+        Some(before) => git::diff_trees(workdir, &git::write_tree(workdir)?, before)?,
+        None => String::new(),
+    };
+
     // Apply staging (apply selected unstaged hunks to the index).
     if !to_stage_patch.is_empty() {
         git::apply_cached_patch(workdir, &to_stage_patch)?;
+    }
+
+    if !to_stage_after_unstage.is_empty() {
+        let paths = paths_after_unstage
+            .iter()
+            .map(|p| format!("`{p}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        git::apply_cached_patch(workdir, &to_stage_after_unstage).with_context(|| {
+            format!(
+                "The picked hunks of {paths} were diffed against staged content being \
+                 unstaged, and no longer apply\n\
+                 Keep the staged hunks of that file in the pick, or commit them first"
+            )
+        })?;
     }
 
     if !files_to_add.is_empty() {
@@ -268,7 +436,7 @@ pub(crate) fn apply_selections(workdir: &Path, files: &[FileEntry]) -> Result<()
             total_ops, files_changed
         ));
     }
-    Ok(())
+    Ok(left_out)
 }
 
 /// Collect hunks from staged changes (HEAD → index).
@@ -309,7 +477,21 @@ fn collect_staged_hunks(
         return Ok(false);
     }
 
-    for h in diff::parse_hunks(&raw_diff) {
+    let parsed = diff::parse_hunks(&raw_diff);
+    // A staged empty file has no `@@` hunk. Without an entry the picker never
+    // offers it, and `commit -p` sets aside what it did not offer.
+    if parsed.is_empty() && index_status == 'A' {
+        hunks.push(HunkEntry {
+            hunk: diff::DiffHunk {
+                text: String::from(diff::EMPTY_ENTRY),
+                modified_lines: vec![],
+            },
+            selected: true,
+            origin: HunkOrigin::Staged,
+        });
+        return Ok(false);
+    }
+    for h in parsed {
         hunks.push(HunkEntry {
             hunk: h,
             selected: true,
@@ -352,7 +534,7 @@ fn collect_unstaged_hunks(
         if raw_bytes.is_empty() {
             hunks.push(HunkEntry {
                 hunk: diff::DiffHunk {
-                    text: String::from("(empty file)"),
+                    text: String::from(diff::EMPTY_ENTRY),
                     modified_lines: vec![],
                 },
                 selected: false,
@@ -581,6 +763,13 @@ impl<'a> StagedAside<'a> {
     /// Put it back now, rather than wherever this would have dropped. Does
     /// nothing once [`StagedAside::handed_over`] has run.
     pub(crate) fn restore(self) {}
+
+    /// Guard `other`'s patch too, put back along with this one's.
+    pub(crate) fn absorb(mut self, other: StagedAside<'a>) -> Self {
+        let extra = other.release();
+        self.patch.push_str(&extra);
+        self
+    }
 
     /// Take the patch back: the caller restores it from here.
     #[must_use = "the set-aside patch is lost unless a new owner keeps it"]

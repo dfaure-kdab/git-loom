@@ -508,7 +508,7 @@ fn execute_action(
                 CommitSource::Files(files) => files,
                 CommitSource::Index => vec![],
             };
-            commit::run(branch, integration, None, false, files, vec![], theme)
+            commit::run(branch, integration, None, None, files, vec![], theme)
         }
         Action::Fold {
             sources,
@@ -1709,9 +1709,11 @@ impl<'a> App<'a> {
         // report under it. Nothing under `apply_selections` may prompt: the
         // thread that would answer is the one sitting here.
         ui::install(self.request_tx.clone());
-        let applied = staging::apply_selections(&self.snapshot.workdir, &picked);
+        let applied =
+            staging::apply_selections(&self.snapshot.workdir, &picked, staging::LeftOut::Unstaged);
         ui::uninstall();
-        applied.map(|()| true)
+        // `C` then commits the index, so an untick unstages, as in `add -p`.
+        applied.map(|_| true)
     }
 
     /// Redraw the tree with the placeholder at the current destination and

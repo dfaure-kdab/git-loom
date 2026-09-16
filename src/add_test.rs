@@ -1,4 +1,5 @@
 use crate::core::graph::Theme;
+use crate::core::hunk_select::HunkArgs;
 use crate::core::test_helpers::TestRepo;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -37,7 +38,7 @@ fn is_staged(porcelain: &str, filename: &str) -> bool {
 /// Shorthand: call `run()` in non-patch mode with the default dark theme.
 fn run_add(files: Vec<String>) -> anyhow::Result<()> {
     let theme = Theme::dark();
-    super::run(files, false, vec![], &theme)
+    super::run(files, false, HunkArgs::default(), vec![], &theme)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -178,7 +179,7 @@ fn add_patch_flag_placeholder() {
     let test_repo = TestRepo::new();
     let theme = Theme::dark();
 
-    let result = test_repo.in_dir(|| super::run(vec![], true, vec![], &theme));
+    let result = test_repo.in_dir(|| super::run(vec![], true, HunkArgs::default(), vec![], &theme));
 
     // In a headless environment the picker auto-cancels, so we expect either
     // Ok(()) or the "Cancelled" error — not a panic or unexpected error.
@@ -295,6 +296,7 @@ fn add_forwards_an_option_after_the_separator() {
         super::run(
             vec!["ignored.txt".to_string()],
             false,
+            HunkArgs::default(),
             vec!["-f".to_string()],
             &theme,
         )
@@ -319,6 +321,7 @@ fn add_unknown_option_reaches_git() {
         super::run(
             vec!["feature.txt".to_string()],
             false,
+            HunkArgs::default(),
             vec!["--definitely-not-a-git-option".to_string()],
             &theme,
         )
@@ -334,7 +337,15 @@ fn add_patch_rejects_forwarded_arguments() {
     let test_repo = setup_with_woven_branch();
 
     let theme = Theme::dark();
-    let result = test_repo.in_dir(|| super::run(vec![], true, vec!["-f".to_string()], &theme));
+    let result = test_repo.in_dir(|| {
+        super::run(
+            vec![],
+            true,
+            HunkArgs::default(),
+            vec!["-f".to_string()],
+            &theme,
+        )
+    });
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("takes no `git add` arguments"),
@@ -352,6 +363,7 @@ fn add_does_not_claim_success_for_a_forwarded_dry_run() {
         super::run(
             vec!["feature.txt".to_string()],
             false,
+            HunkArgs::default(),
             vec!["--dry-run".to_string()],
             &theme,
         )
@@ -371,7 +383,15 @@ fn add_without_files_rejects_forwarded_arguments_without_blaming_patch() {
     let test_repo = setup_with_woven_branch();
 
     let theme = Theme::dark();
-    let result = test_repo.in_dir(|| super::run(vec![], false, vec!["-f".to_string()], &theme));
+    let result = test_repo.in_dir(|| {
+        super::run(
+            vec![],
+            false,
+            HunkArgs::default(),
+            vec!["-f".to_string()],
+            &theme,
+        )
+    });
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("staging hunks interactively"),

@@ -22,6 +22,7 @@ fn fold_file_into_head() {
         &head_oid.to_string(),
         false,
         &[],
+        None,
     );
 
     assert!(
@@ -52,6 +53,7 @@ fn fold_multiple_files_into_head() {
         &head_oid.to_string(),
         false,
         &[],
+        None,
     );
 
     assert!(result.is_ok(), "fold failed: {:?}", result);
@@ -74,6 +76,7 @@ fn fold_file_into_non_head_commit() {
         &c1_oid.to_string(),
         false,
         &[],
+        None,
     );
 
     assert!(
@@ -101,6 +104,7 @@ fn fold_file_no_changes_fails() {
         &head_oid.to_string(),
         false,
         &[],
+        None,
     );
 
     assert!(result.is_err());
@@ -122,6 +126,7 @@ fn fold_file_into_non_head_with_other_changes_autostashed() {
         &c1_oid.to_string(),
         false,
         &[],
+        None,
     );
 
     assert!(
@@ -159,6 +164,7 @@ fn fold_file_into_woven_branch_commit() {
         &feat1_oid.to_string(),
         false,
         &[],
+        None,
     );
 
     assert!(
@@ -226,8 +232,14 @@ fn fold_patch_only_staged_hunk_is_folded_into_head() {
     let staged = crate::core::repo::get_staged_files(&test_repo.repo).unwrap();
     assert_eq!(staged, vec!["file.txt"]);
 
-    let result =
-        super::fold_files_into_commit(&test_repo.repo, &staged, &head_oid.to_string(), true, &[]);
+    let result = super::fold_files_into_commit(
+        &test_repo.repo,
+        &staged,
+        &head_oid.to_string(),
+        true,
+        &[],
+        None,
+    );
     assert!(
         result.is_ok(),
         "fold_files_into_commit failed: {:?}",
@@ -283,8 +295,14 @@ fn fold_patch_only_staged_hunk_is_folded_into_non_head() {
     crate::git::apply_cached_patch(workdir.as_path(), first_hunk_patch).unwrap();
 
     let staged = crate::core::repo::get_staged_files(&test_repo.repo).unwrap();
-    let result =
-        super::fold_files_into_commit(&test_repo.repo, &staged, &target_oid.to_string(), true, &[]);
+    let result = super::fold_files_into_commit(
+        &test_repo.repo,
+        &staged,
+        &target_oid.to_string(),
+        true,
+        &[],
+        None,
+    );
     assert!(
         result.is_ok(),
         "fold_files_into_commit failed: {:?}",
@@ -329,6 +347,7 @@ fn fold_into_a_non_head_commit_stages_the_other_files_again() {
         &target_oid.to_string(),
         true,
         &[],
+        None,
     );
     assert!(result.is_ok(), "fold failed: {result:?}");
 
@@ -363,6 +382,7 @@ fn a_fold_failing_after_the_fixup_commit_puts_back_the_staging() {
         &target_oid.to_string(),
         true,
         &[],
+        None,
     );
 
     assert!(result.is_err(), "the state file cannot be written");
@@ -2584,6 +2604,7 @@ fn fold_rolls_back_when_the_rebase_refuses_to_start() {
         &a_oid.to_string(),
         false,
         &[],
+        None,
     );
 
     assert!(
@@ -2655,6 +2676,7 @@ fn fold_into_an_out_of_scope_commit_leaves_the_repo_alone() {
         &out_of_scope.to_string(),
         false,
         &[],
+        None,
     );
 
     assert!(result.is_err(), "an out-of-scope target must be refused");
@@ -3071,6 +3093,7 @@ fn fold_abort_preserves_working_state() {
         &a_oid.to_string(),
         false,
         &[],
+        None,
     );
     assert!(
         result.is_ok(),
@@ -3127,6 +3150,7 @@ fn fold_unstaged_deletion_into_head() {
         &head_oid.to_string(),
         false,
         &[],
+        None,
     );
 
     assert!(result.is_ok(), "fold of a deletion failed: {:?}", result);
@@ -3151,6 +3175,7 @@ fn fold_staged_deletion_into_head() {
         &head_oid.to_string(),
         false,
         &[],
+        None,
     );
 
     assert!(
@@ -3179,6 +3204,7 @@ fn fold_staged_deletion_into_non_head_commit() {
         &c2_oid.to_string(),
         false,
         &[],
+        None,
     );
 
     assert!(
@@ -3520,6 +3546,7 @@ fn fold_files_into_commit_refuses_when_the_target_replays_empty() {
         &redundant.to_string(),
         false,
         &[],
+        None,
     )
     .unwrap_err()
     .to_string();
@@ -4485,6 +4512,7 @@ fn a_forwarded_fold_into_an_older_commit_keeps_the_commits_above_it() {
         &first.to_string(),
         false,
         &["--no-verify"],
+        None,
     )
     .unwrap();
 
@@ -4509,6 +4537,7 @@ fn a_forwarded_amend_on_the_fixup_path_rolls_back() {
         &first.to_string(),
         false,
         &["--amend"],
+        None,
     )
     .unwrap_err();
 
@@ -4543,6 +4572,7 @@ fn a_forwarded_dry_run_on_the_amend_rolls_back() {
         &head.to_string(),
         false,
         &["--dry-run"],
+        None,
     )
     .unwrap_err();
 
@@ -4573,6 +4603,7 @@ fn a_refused_fixup_commit_gives_the_index_back() {
             &first.to_string(),
             false,
             &[],
+            None,
         )
         .is_err()
     );
@@ -4689,6 +4720,7 @@ fn an_empty_fixup_commit_is_refused_before_the_squash() {
         &first.to_string(),
         false,
         &["--only", "--allow-empty"],
+        None,
     )
     .unwrap_err();
 
@@ -4696,4 +4728,34 @@ fn an_empty_fixup_commit_is_refused_before_the_squash() {
     assert_eq!(t.head_oid(), head, "nothing was rewritten");
     assert_eq!(t.commit_messages()[..3], ["Second", "First", "Base"]);
     assert_eq!(t.status_porcelain(), format!("{before} M f1.txt\n"));
+}
+
+/// A target the weave cannot rewrite is refused before the picker stages, so
+/// the replay leaves the index as the user had it.
+#[test]
+fn fold_patch_refuses_an_upstream_target_before_staging() {
+    let t = TestRepo::new_with_remote();
+    let base = t.find_remote_branch_target("origin/main").to_string();
+    t.commit_multi(&[("a.txt", "a\n"), ("b.txt", "b\n")], "Local");
+    t.write_file("a.txt", "a staged\n");
+    t.stage_files(&["a.txt"]);
+    t.write_file("b.txt", "b unstaged\n");
+
+    let entries = crate::core::staging::collect_file_entries(&t.repo, &t.workdir(), None).unwrap();
+    let fp = crate::core::hunk_select::fingerprint("", Some(&base), &entries);
+
+    let result = t.in_dir(|| {
+        super::run(
+            false,
+            true,
+            None,
+            HunkArgs::new(vec!["b.txt:1".into()], Some(fp)),
+            vec!["zz".into(), base.clone()],
+            vec![],
+            &crate::core::graph::Theme::dark(),
+        )
+    });
+    let err = result.expect_err("upstream target").to_string();
+    assert!(err.contains("not in the weave"), "{err}");
+    assert_eq!(t.status_porcelain(), "M  a.txt\n M b.txt\n");
 }

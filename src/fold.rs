@@ -3,7 +3,6 @@ use git2::{Repository, StatusOptions};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use crate::core::agent_mode;
 use crate::core::diff;
 use crate::core::graph;
 use crate::core::hunk_select::{self, HunkArgs, Picker};
@@ -153,7 +152,7 @@ pub fn run(
 
     match classify(&resolved_sources, &resolved_target)? {
         FoldOp::FilesIntoCommit { files, commit } => {
-            fold_files_into_commit(&repo, &files, &commit, false, &git_opts)
+            fold_files_into_commit(&repo, &files, &commit, false, &git_opts, None)
         }
         FoldOp::CommitIntoCommit { source, target } => {
             no_git_args(&git_opts, "folding a commit into another")?;
@@ -635,12 +634,18 @@ fn report_moved_relative(
 /// `fold -p` moves text hunks, and submodules and deletions whole. A binary
 /// file has nothing to move (Spec 007), so `--hunks` refuses its id — but the
 /// TUI still offers it, and `fold` then leaves it behind with a warning.
-fn fold_picker(hunks: &HunkArgs, command: &str, target_hash: Option<&str>) -> Picker {
+fn fold_picker(
+    hunks: &HunkArgs,
+    command: &str,
+    target_hash: Option<&str>,
+    git_opts: &[&str],
+) -> Picker {
     Picker {
         hunks: hunks.clone(),
         command: command.to_string(),
         whole_files: false,
         target_hash: target_hash.map(str::to_string),
+        git_args: hunk_select::git_args_suffix(git_opts),
     }
 }
 
@@ -673,6 +678,7 @@ fn run_patch_fold(
                     hunks,
                     &format!("loom fold -p {} zz", hunk_select::quoted(source_arg)),
                     None,
+                    git_opts,
                 );
                 return run_patch_fold_commit_to_unstaged(
                     repo,
@@ -694,6 +700,7 @@ fn run_patch_fold(
                         hunk_select::quoted(target_arg)
                     ),
                     Some(&target_hash),
+                    git_opts,
                 );
                 return run_patch_fold_commit_to_commit(
                     repo,
@@ -728,39 +735,55 @@ fn run_patch_fold(
         }
     }
 
-    // Working-tree hunks have no id listing: staged and unstaged entries for the
-    // same file share the numbering and it shifts as soon as anything is staged.
-    if !hunks.is_empty() {
-        bail!(
-            "--hunks only applies to a commit source\n\
-             Use `loom fold -p <commit> <target>`, or pass explicit files"
-        );
-    }
-    if agent_mode::enabled() {
-        bail!(
-            "--patch over working-tree changes is interactive and unavailable in agent mode\n\
-             Pass explicit files instead"
-        );
-    }
-
     let resolved = repo::resolve_arg(repo, target_arg, &[TargetKind::Commit])?;
     let commit_hash = match resolved {
         Target::Commit(hash) => hash,
         _ => unreachable!(),
     };
 
+    // Before the picker stages: a target the weave cannot rewrite would be
+    // refused with the index already changed.
+    let target_oid = git2::Oid::from_str(&commit_hash)?;
+    if repo::head_oid(repo)? != target_oid {
+        Weave::from_repo(repo)?.require_commit(target_oid)?;
+    }
+
     // Resolved once, before the picker stages: a short ID names what is changed
     // now, and staging changes that.
     let filter = staging::filter_paths(repo, source_args)?;
 
-    let staged = match staging::run_hunk_picker(repo, workdir, filter.as_deref(), theme)? {
-        Some(paths) => paths,
+    let picker = hunk_select::worktree_picker(
+        hunks.clone(),
+        format!(
+            "{} {}",
+            hunk_select::patch_command("loom fold", source_args),
+            hunk_select::quoted(target_arg)
+        ),
+        Some(&commit_hash),
+        git_opts,
+    );
+    let picked = match staging::run_hunk_picker(
+        repo,
+        workdir,
+        filter.as_deref(),
+        &picker,
+        staging::LeftOut::KeptStaged,
+        theme,
+    )? {
+        Some(picked) => picked,
         None => return Err(msg::cancelled()),
     };
-    if staged.is_empty() {
+    if picked.paths.is_empty() {
         bail!("No hunks selected");
     }
-    fold_files_into_commit(repo, &staged, &commit_hash, true, git_opts)
+    fold_files_into_commit(
+        repo,
+        &picked.paths,
+        &commit_hash,
+        true,
+        git_opts,
+        Some(picked.left_out),
+    )
 }
 
 /// `fold -p [<files>...] <commit>` with the working-tree hunks already picked,
@@ -780,11 +803,18 @@ pub fn run_picked(picked: &[FileEntry], stamp: &[Option<git2::Oid>], target: &st
              Pick them again"
         );
     }
-    let staged = staging::stage_selection(workdir, picked)?;
-    if staged.is_empty() {
+    let picked = staging::stage_selection(workdir, picked, staging::LeftOut::KeptStaged)?;
+    if picked.paths.is_empty() {
         bail!("No hunks selected");
     }
-    fold_files_into_commit(&repo, &staged, &commit_hash, true, &[])
+    fold_files_into_commit(
+        &repo,
+        &picked.paths,
+        &commit_hash,
+        true,
+        &[],
+        Some(picked.left_out),
+    )
 }
 
 /// The selected entries of this file that travel in the hunk patch. A
@@ -1370,7 +1400,7 @@ fn run_staged(repo: &Repository, target_arg: &str, git_opts: &[&str]) -> Result<
     if staged.is_empty() {
         bail!("Nothing to commit");
     }
-    fold_files_into_commit(repo, &staged, &commit_hash, true, git_opts)
+    fold_files_into_commit(repo, &staged, &commit_hash, true, git_opts, None)
 }
 
 #[derive(Debug)]
@@ -1546,12 +1576,16 @@ fn collect_changed_files(repo: &Repository) -> Result<Vec<String>> {
 ///
 /// When `skip_staging` is true the caller has already staged exactly the right
 /// content (e.g. from a hunk picker), so the file-level `git add` is skipped.
+///
+/// `left_out` is staged work a hunk picker unstaged because the pick left it
+/// out: it stays staged too, set aside with the other staged files.
 fn fold_files_into_commit(
     repo: &Repository,
     files: &[String],
     commit_hash: &str,
     skip_staging: bool,
     git_opts: &[&str],
+    left_out: Option<staging::StagedAside<'_>>,
 ) -> Result<()> {
     let workdir = repo::require_workdir(repo, COMMAND)?;
 
@@ -1583,7 +1617,10 @@ fn fold_files_into_commit(
 
     // Unstage pre-existing staged files outside the target list, so they do
     // not end up in this commit/amend.
-    let staged = staging::save_and_unstage_other_staged(repo, workdir, &file_refs)?;
+    let mut staged = staging::save_and_unstage_other_staged(repo, workdir, &file_refs)?;
+    if let Some(left_out) = left_out {
+        staged = staged.absorb(left_out);
+    }
 
     let new_hash;
 

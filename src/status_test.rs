@@ -252,7 +252,7 @@ fn commit_id_survives_an_update_rebase() {
                 Some("feature-a".to_string()),
                 false,
                 Some("Add a".to_string()),
-                false,
+                None,
                 vec!["a.txt".to_string()],
                 vec![],
                 &crate::core::graph::Theme::dark(),

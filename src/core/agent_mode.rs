@@ -59,6 +59,11 @@ pub struct HunkItem {
     pub diff: String,
     /// False for an entry this command cannot take (spec 019).
     pub selectable: bool,
+    /// Already staged, so already part of the selection. `--hunks` replaces the
+    /// selection wholesale; what then happens to a staged id left out depends
+    /// on the command (Spec 019).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub staged: bool,
 }
 
 /// The kind of input a prompt would have collected.
@@ -398,12 +403,14 @@ mod tests {
                     path: "a.rs".to_string(),
                     diff: "@@ -1 +1 @@\n-a\n+b\n".to_string(),
                     selectable: true,
+                    staged: false,
                 },
                 HunkItem {
                     id: "logo.png:1".to_string(),
                     path: "logo.png".to_string(),
                     diff: "(binary file)".to_string(),
                     selectable: false,
+                    staged: false,
                 },
             ],
             "a91c3f2be417".to_string(),

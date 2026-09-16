@@ -21,7 +21,7 @@ With one argument, fold the current index into that target. With two or more, th
 - `-c, --create`: create a new branch at the resolved Weave base and move one or more source commits into it. The target name MUST NOT exist. Sources may be loose or already branch-owned. Order commits oldest-first (ancestors before descendants; unrelated lines by committer date), independent of input order.
 - `--above <commit>` / `--below <commit>`: move one or more source commits directly above or below the target commit, per [Commit move next to a commit](#commit-move-next-to-a-commit). The two are mutually exclusive and exclude `-c` and `-p`.
 - `-p, --patch`: select hunks according to [Patch mode](#patch-mode--p), interactively or with `--hunks`. Excludes `-c`, which moves whole commits.
-- `--hunks <id>` (repeated) with `--hunks-from <fingerprint>`: supply a commit-source `-p` selection by id instead of picking it. Requires `-p`, and each flag requires the other.
+- `--hunks <id>` (repeated) with `--hunks-from <fingerprint>`: supply the `-p` selection by id instead of picking it, in every form. Requires `-p`, and each flag requires the other.
 - `zz`: reserved `Unstaged` target/source representing the working directory/all its changes.
 - `commit_sid:index` (for example `fa:0`): `CommitFile` shown by `git loom status -f`.
 - `-- <git args>...`: forward untouched to the `git commit` fold runs itself — the amend, or the `fixup!` commit for a non-HEAD target (for example `--no-verify`, `-q`; Spec 021). A whole-commit form takes none. Loom's own arguments come last, so a boolean git resolves last-wins (`--no-amend`, `--edit`) has no effect; a message source (`-m`, `-F`, `-c`/`-C`, `--fixup`, `--squash`) still rewords every commit fold makes — both of them on the forms that move a file or hunks between two commits, a pathspec still restricts it with `--only` semantics, and `-a`/`-i` still sweep in changes fold was not given. Before anything is rewritten, the fixup path verifies that git left a new commit on HEAD and, with forwarded arguments, that it holds a different tree; an amend carrying forwarded arguments verifies that HEAD's tree changed. Any failure takes the commit attempt back whole.
@@ -157,14 +157,15 @@ Both messages, all other files, topology, unrelated branches, and pre-existing c
 
 ## Patch mode (`-p`)
 
-All forms open the interactive hunk picker and require at least one selection; otherwise error `No hunks selected`. The two commit-source forms below also accept the selection by id, which is how agent mode answers the picker (Spec 019):
+All forms open the interactive hunk picker and require at least one selection; otherwise error `No hunks selected`. All three forms below also accept the selection by id, which is how agent mode answers the picker (Spec 019):
 
 ```bash
+git-loom fold -p [<files>...] <commit> --hunks <id> [--hunks <id>...] --hunks-from <fingerprint>
 git-loom fold -p <source> <target> --hunks <id> [--hunks <id>...] --hunks-from <fingerprint>
 git-loom fold -p <commit> zz --hunks <id> [--hunks <id>...] --hunks-from <fingerprint>
 ```
 
-`--hunks` on the working-tree form errors exactly ``--hunks only applies to a commit source⏎Use `loom fold -p <commit> <target>`, or pass explicit files``. An id-supplied selection follows the interactive path from validation onward, including the hard-fail and rollback rules below.
+An id-supplied selection follows the interactive path from validation onward, including the hard-fail and rollback rules below. On the working-tree form the ids are the whole selection: a staged hunk left out of them is not folded and stays staged, set aside like any other staged path (Spec 019).
 
 ### Working-tree hunks into Commit
 
@@ -172,7 +173,7 @@ git-loom fold -p <commit> zz --hunks <id> [--hunks <id>...] --hunks-from <finger
 git-loom fold -p [<files>...] <commit>
 ```
 
-Show the current working-tree diff, filtered by optional paths (`zz` means all). Stage only selected hunks and amend them into target. Unselected changes remain unstaged. Only paths the picker staged are folded; a path it never listed — outside the filter, or with no hunk to show such as a mode-only change — stays staged. A folded path carries its whole index entry, including a staged change the listing did not show. Rewrite target/descendants; retain messages and unrelated content.
+Show the current working-tree diff, filtered by optional paths (`zz` means all). Stage only selected hunks and amend them into target. Unselected changes remain unstaged. Only paths the picker staged are folded; a path it never listed — outside the filter, or with no hunk to show such as a mode-only change — stays staged. A folded path carries its whole index entry, including a staged change the listing did not show. A target the weave cannot rewrite is refused before the picker stages anything. Rewrite target/descendants; retain messages and unrelated content.
 
 ### Commit hunks into older Commit
 

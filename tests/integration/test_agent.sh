@@ -141,13 +141,13 @@ LOOM_AGENT=1 gl_capture_json completions notashell
 assert_eq "1" "$CODE" "completions_bad_shell_exit"
 assert_not_contains "$JSON$STDERR" '"status"' "completions_bad_shell_no_json"
 
-# ── error: -p is rejected ─────────────────────────────────────────────────────
+# ── -p answers with a listing, never a TUI ───────────────────────────────────
 
-describe "agent mode: -p/--patch is rejected with a structured error"
+describe "agent mode: -p with nothing to stage says so"
 gl_capture add --agent -p
-assert_eq "1" "$CODE" "patch_rejected_exit"
-assert_contains "$OUT" '"status":"error"' "patch_rejected_status"
-assert_contains "$OUT" "--patch is interactive" "patch_rejected_msg"
+assert_eq "1" "$CODE" "patch_nothing_exit"
+assert_contains "$OUT" '"status":"error"' "patch_nothing_status"
+assert_contains "$OUT" "No changes to stage" "patch_nothing_msg"
 
 # ── error: tui is rejected ────────────────────────────────────────────────────
 
@@ -713,21 +713,484 @@ assert_eq "1" "$CODE" "unanswerable_exit"
 assert_contains "$OUT" "only binary files" "unanswerable_msg"
 assert_not_contains "$OUT" "needs_input" "unanswerable_not_a_prompt"
 
-describe "agent mode: -p over working-tree changes is still rejected"
+# The case `-p` exists for: two logical changes in one file, no TUI available.
+describe "agent mode: -p works over working-tree changes"
 setup_two_hunk_commit
-write_file multi.txt "dirty"
+perl -pi -e 's/^5$/FIVE/; s/^35$/THIRTYFIVE/' "$WORK/multi.txt"
 
-gl_capture fold -p HEAD --agent
-assert_eq "1" "$CODE" "fold_worktree_patch_exit"
-assert_contains "$OUT" '"status":"error"' "fold_worktree_patch_status"
-assert_contains "$OUT" "unavailable in agent mode" "fold_worktree_patch_msg"
+gl_capture fold -p multi.txt HEAD --agent
+assert_eq "10" "$CODE" "worktree_patch_listed_exit"
+assert_contains "$OUT" '"options":["multi.txt:1","multi.txt:2"]' "worktree_patch_listed_options"
+assert_contains "$OUT" "+FIVE" "worktree_patch_listed_diff"
+FP="$(json_fingerprint)"
 
-gl_capture fold -p HEAD --hunks multi.txt:1 --hunks-from deadbeef --agent
-assert_eq "1" "$CODE" "fold_worktree_hunks_exit"
-assert_contains "$OUT" "only applies to a commit source" "fold_worktree_hunks_msg"
+gl_capture fold -p multi.txt HEAD --hunks multi.txt:1 --hunks-from "$FP" --agent
+assert_exit_ok "$CODE" "worktree_patch_folded_exit"
+assert_contains "$(show_patch HEAD)" "+FIVE" "worktree_patch_folded_hunk"
+assert_contains "$(diff_patch)" "+THIRTYFIVE" "worktree_patch_left_the_rest"
 
-# Validating the arguments first is what makes this message the one about
-# unsupported sources rather than the working-tree-patch one below it.
+# A staged change with no hunk to show — a mode-only one — is not in the
+# listing either, so it is not the picker's to fold.
+describe "agent mode: fold -p leaves a staged change its picker could not show"
+setup_two_hunk_commit
+printf '#!/bin/sh\necho hi\n' > "$WORK/m.sh"
+git -C "$WORK" add m.sh
+git -C "$WORK" commit -q -m "add a script"
+chmod +x "$WORK/m.sh"
+git -C "$WORK" add m.sh
+perl -pi -e 's/^5$/FIVE/' "$WORK/multi.txt"
+
+gl_capture fold -p zz HEAD --agent
+assert_not_contains "$OUT" "m.sh" "fold_modeonly_not_listed"
+FP="$(json_fingerprint)"
+
+gl_capture fold -p zz HEAD --hunks multi.txt:1 --hunks-from "$FP" --agent
+assert_exit_ok "$CODE" "fold_modeonly_exit"
+assert_eq "100644" "$(git -C "$WORK" ls-tree HEAD m.sh | awk '{print $1}')" "fold_modeonly_not_folded"
+assert_contains "$(git -C "$WORK" diff --cached --name-only)" "m.sh" "fold_modeonly_still_staged"
+
+# The picker filters to <files>, so a file staged outside it was never listed
+# and nobody picked it: it stays staged and out of the commit.
+describe "agent mode: fold -p folds only the files its picker listed"
+setup_two_hunk_commit
+echo "unrelated work" > "$WORK/other.txt"
+git -C "$WORK" add other.txt
+perl -pi -e 's/^5$/FIVE/' "$WORK/multi.txt"
+
+gl_capture fold -p multi.txt HEAD --agent
+assert_not_contains "$OUT" "other.txt" "fold_scope_not_listed"
+FP="$(json_fingerprint)"
+
+gl_capture fold -p multi.txt HEAD --hunks multi.txt:1 --hunks-from "$FP" --agent
+assert_exit_ok "$CODE" "fold_scope_exit"
+assert_contains "$(show_patch HEAD)" "+FIVE" "fold_scope_folded_the_pick"
+assert_not_contains "$(show_patch HEAD)" "unrelated work" "fold_scope_no_leak"
+assert_contains "$(git -C "$WORK" diff --cached --name-only)" "other.txt" "fold_scope_kept_staged"
+
+# `--hunks` is the whole selection, so a staged hunk left out comes back out.
+describe "agent mode: add -p --hunks replaces the whole selection"
+setup_repo_with_remote
+seq 1 40 > "$WORK/f.txt"
+git -C "$WORK" add f.txt
+git -C "$WORK" commit -q -m base
+perl -pi -e 's/^3$/THREE/; s/^37$/THIRTYSEVEN/' "$WORK/f.txt"
+
+gl_capture add -p f.txt --agent
+FP="$(json_fingerprint)"
+gl_capture add -p f.txt --hunks f.txt:1 --hunks-from "$FP" --agent
+assert_exit_ok "$CODE" "add_patch_staged_exit"
+assert_contains "$(diff_patch --cached)" "+THREE" "add_patch_staged_first"
+
+gl_capture add -p f.txt --agent
+assert_contains "$OUT" '"staged":true' "add_patch_marks_staged"
+FP="$(json_fingerprint)"
+
+gl_capture add -p f.txt --hunks f.txt:2 --hunks-from "$FP" --agent
+assert_exit_ok "$CODE" "add_patch_replace_exit"
+assert_contains "$(diff_patch --cached)" "+THIRTYSEVEN" "add_patch_replace_staged"
+assert_not_contains "$(diff_patch --cached)" "+THREE" "add_patch_replace_unstaged"
+
+# Unstaging reverse-applies to the index alone, and INDEXONLY is in the index
+# and nowhere else once the working tree changed it again.
+describe "agent mode: add -p refuses to unstage what only the index holds"
+setup_repo_with_remote
+seq 1 40 > "$WORK/f.txt"
+git -C "$WORK" add f.txt
+git -C "$WORK" commit -q -m base
+perl -pi -e 's/^3$/INDEXONLY/' "$WORK/f.txt"
+git -C "$WORK" add f.txt
+perl -pi -e 's/^INDEXONLY$/WORKTREE/; s/^37$/THIRTYSEVEN/' "$WORK/f.txt"
+
+gl_capture add -p f.txt --agent
+FP="$(json_fingerprint)"
+gl_capture add -p f.txt --hunks f.txt:3 --hunks-from "$FP" --agent
+assert_eq "1" "$CODE" "index_only_refused_exit"
+assert_contains "$OUT" 'Keep `f.txt:1`' "index_only_refused_msg"
+assert_contains "$(diff_patch --cached)" "+INDEXONLY" "index_only_kept"
+
+gl_capture add -p f.txt --hunks f.txt:1 --hunks f.txt:3 --hunks-from "$FP" --agent
+assert_exit_ok "$CODE" "index_only_kept_exit"
+assert_contains "$(diff_patch --cached)" "+THIRTYSEVEN" "index_only_staged_the_pick"
+assert_contains "$(diff_patch --cached)" "+INDEXONLY" "index_only_still_staged"
+
+# The stage patch is diffed against the index before the unstaging, whose
+# change sits in its context: refused, and the unstaging before it undone.
+describe "agent mode: add -p refuses to swap two nearby hunks"
+setup_repo_with_remote
+seq 1 10 > "$WORK/f.txt"
+git -C "$WORK" add f.txt
+git -C "$WORK" commit -q -m base
+perl -pi -e 's/^3$/THREE/' "$WORK/f.txt"
+git -C "$WORK" add f.txt
+perl -pi -e 's/^5$/FIVE/' "$WORK/f.txt"
+
+gl_capture add -p f.txt --agent
+FP="$(json_fingerprint)"
+gl_capture add -p f.txt --hunks f.txt:2 --hunks-from "$FP" --agent
+assert_eq "1" "$CODE" "swap_exit"
+assert_contains "$OUT" "no longer apply" "swap_msg"
+assert_contains "$(diff_patch --cached)" "+THREE" "swap_kept_index"
+assert_not_contains "$(diff_patch --cached)" "+FIVE" "swap_staged_nothing"
+assert_eq "" "$(find "$WORK/.git" -maxdepth 1 -name 'index.lock')" "swap_no_lock_left"
+
+# A looser match would find `bar;` in fn a and stage `baz;` there.
+describe "agent mode: add -p never places a hunk by a looser match"
+setup_repo_with_remote
+printf 'fn a() {\n    foo;\n    bar;\n}\nfn b() {\n    old;\n    bar;\n}\n' > "$WORK/f.rs"
+git -C "$WORK" add f.rs
+git -C "$WORK" commit -q -m base
+perl -pi -e 's/old;/foo;/' "$WORK/f.rs"
+git -C "$WORK" add f.rs
+perl -pi -e 's/bar;/baz;/ if $. == 7' "$WORK/f.rs"
+
+gl_capture add -p f.rs --agent
+FP="$(json_fingerprint)"
+gl_capture add -p f.rs --hunks f.rs:2 --hunks-from "$FP" --agent
+assert_eq "1" "$CODE" "fuzz_refused_exit"
+assert_not_contains "$(git -C "$WORK" show :f.rs)" "baz" "fuzz_nothing_misplaced"
+assert_contains "$(diff_patch --cached)" "+    foo;" "fuzz_kept_index"
+
+# Kept staged, the left-out hunk travels as a blob, so the index-only refusal
+# `add -p` needs would only stand in the way here.
+describe "agent mode: commit -p may leave out what only the index holds"
+setup_repo_with_remote
+seq 1 40 > "$WORK/f.txt"
+echo g > "$WORK/g.txt"
+git -C "$WORK" add f.txt g.txt
+git -C "$WORK" commit -q -m base
+perl -pi -e 's/^5$/INDEXONLY/' "$WORK/f.txt"
+git -C "$WORK" add f.txt
+perl -pi -e 's/^INDEXONLY$/WORKTREE/' "$WORK/f.txt"
+echo gg > "$WORK/g.txt"
+
+gl_capture commit -i -m msg -p --agent
+FP="$(json_fingerprint)"
+gl_capture commit -i -m msg -p --hunks g.txt:1 --hunks-from "$FP" --agent
+assert_exit_ok "$CODE" "commit_index_only_exit"
+assert_contains "$(show_patch HEAD)" "+gg" "commit_index_only_committed_pick"
+assert_not_contains "$(show_patch HEAD)" "INDEXONLY" "commit_index_only_not_committed"
+assert_contains "$(diff_patch --cached)" "+INDEXONLY" "commit_index_only_still_staged"
+
+# Unstaged whole, a new file's index blob goes, and the worktree hunks were
+# diffed against it.
+describe "agent mode: commit -p says why a hunk of a file it unstages cannot apply"
+setup_repo_with_remote
+seq 1 10 > "$WORK/n.txt"
+git -C "$WORK" add n.txt
+perl -pi -e 's/^5$/FIVE/' "$WORK/n.txt"
+
+gl_capture commit -i -m msg -p n.txt --agent
+FP="$(json_fingerprint)"
+gl_capture commit -i -m msg -p n.txt --hunks n.txt:2 --hunks-from "$FP" --agent
+assert_eq "1" "$CODE" "unstaged_whole_exit"
+assert_contains "$OUT" "no longer apply" "unstaged_whole_msg"
+assert_contains "$(git -C "$WORK" diff --cached --name-status)" "A	n.txt" "unstaged_whole_kept_index"
+
+# A stash pop that conflicts leaves unmerged paths with no operation to
+# finish, and `git write-tree` refuses such an index.
+describe "agent mode: add -p unstages beside an unmerged path"
+setup_repo_with_remote
+seq 1 40 > "$WORK/f.txt"
+echo a > "$WORK/c.txt"
+git -C "$WORK" add f.txt c.txt
+git -C "$WORK" commit -q -m base
+echo s > "$WORK/c.txt"
+git -C "$WORK" stash -q
+echo t > "$WORK/c.txt"
+git -C "$WORK" commit -q -am t
+git -C "$WORK" stash pop -q >/dev/null 2>&1 || true
+perl -pi -e 's/^3$/THREE/; s/^37$/THIRTYSEVEN/' "$WORK/f.txt"
+git -C "$WORK" add f.txt
+
+gl_capture add -p f.txt --agent
+FP="$(json_fingerprint)"
+gl_capture add -p f.txt --hunks f.txt:1 --hunks-from "$FP" --agent
+assert_exit_ok "$CODE" "unmerged_beside_exit"
+assert_not_contains "$(diff_patch --cached f.txt)" "THIRTYSEVEN" "unmerged_beside_unstaged"
+
+# The listing is pre-flight, so a file staged before it must still be staged
+# after it — including content that exists only in the index.
+describe "agent mode: commit -p leaves the index it was handed"
+setup_repo_with_remote
+seq 1 40 > "$WORK/f.txt"
+echo "committed" > "$WORK/other.txt"
+git -C "$WORK" add f.txt other.txt
+git -C "$WORK" commit -q -m base
+git -C "$WORK" push -q origin "integration:$BASE_BRANCH"
+git -C "$WORK" fetch -q origin
+echo "index only" > "$WORK/other.txt"
+git -C "$WORK" add other.txt
+echo "committed" > "$WORK/other.txt"
+perl -pi -e 's/^3$/THREE/; s/^37$/THIRTYSEVEN/' "$WORK/f.txt"
+
+gl_capture commit -b feat -m msg -p f.txt --agent
+assert_eq "10" "$CODE" "commit_patch_listed_exit"
+assert_contains "$(diff_patch --cached)" "index only" "commit_patch_listing_kept_index"
+FP="$(json_fingerprint)"
+
+gl_capture commit -b feat -m msg -p f.txt --hunks f.txt:99 --hunks-from "$FP" --agent
+assert_eq "1" "$CODE" "commit_patch_bad_id_exit"
+assert_contains "$(diff_patch --cached)" "index only" "commit_patch_bad_id_kept_index"
+
+gl_capture commit -b feat -m msg -p f.txt --hunks f.txt:1 --hunks-from "$FP" --agent
+assert_exit_ok "$CODE" "commit_patch_exit"
+assert_contains "$(show_patch feat)" "+THREE" "commit_patch_took_the_hunk"
+assert_not_contains "$(show_patch feat)" "THIRTYSEVEN" "commit_patch_left_the_rest"
+assert_not_contains "$(git -C "$WORK" show feat --name-only --pretty=)" "other.txt" "commit_patch_no_leak"
+assert_contains "$(diff_patch --cached)" "index only" "commit_patch_kept_index"
+
+# With neither -b nor -i the branch prompt comes first, keeping -p in its hint:
+# answered without it, the re-run stages whole files and undoes the picking.
+describe "agent mode: commit -p asks for the branch before it stages"
+gl_capture commit -m msg -p f.txt --agent
+assert_eq "10" "$CODE" "commit_patch_branch_first_exit"
+assert_contains "$OUT" '"prompt":"Select target branch"' "commit_patch_branch_first_prompt"
+assert_contains "$OUT" 'loom commit -b <branch> -m msg -p f.txt' "commit_patch_branch_first_hint"
+assert_not_contains "$(git -C "$WORK" diff --cached --name-only)" "f.txt" "commit_patch_branch_first_staged_nothing"
+
+gl_capture commit -i -m msg -p f.txt --agent
+assert_eq "10" "$CODE" "commit_patch_integration_exit"
+assert_contains "$OUT" '"prompt":"Select hunks"' "commit_patch_integration_lists"
+
+# The fingerprint does not cover the branch, so a replay can carry a bad one.
+describe "agent mode: commit -p refuses a bad -b before it stages"
+git -C "$WORK" branch lone "$(git -C "$WORK" commit-tree 'HEAD^{tree}' -m lone)"
+gl_capture commit -i -m msg -p f.txt --agent
+FP="$(json_fingerprint)"
+gl_capture commit -b lone -m msg -p f.txt --hunks f.txt:1 --hunks-from "$FP" --agent
+assert_eq "1" "$CODE" "commit_patch_bad_branch_exit"
+assert_contains "$OUT" "not woven into the integration branch" "commit_patch_bad_branch_msg"
+assert_not_contains "$(git -C "$WORK" diff --cached --name-only)" "f.txt" "commit_patch_bad_branch_staged_nothing"
+
+describe "agent mode: commit -p hints keep -p and the forwarded git args"
+gl_capture commit -p f.txt --agent -- --no-verify
+assert_eq "10" "$CODE" "commit_patch_message_exit"
+assert_contains "$OUT" "-m <message> [-b <branch> | -i] -p f.txt -- --no-verify" "commit_patch_message_hint"
+
+gl_capture commit -m msg -p f.txt --agent -- --no-verify
+assert_contains "$OUT" "-m msg -p f.txt -- --no-verify (a new name" "commit_patch_branch_hint_git_args"
+
+gl_capture commit -i -m msg -p f.txt --agent -- --no-verify
+assert_contains "$OUT" "--hunks-from $(json_fingerprint) -- --no-verify" "commit_patch_listing_hint_git_args"
+assert_contains "$OUT" "loom commit -i -m msg -p f.txt --hunks" "commit_patch_listing_hint_raw_message"
+
+# For commit and fold, a staged id left out means "not in this one", not
+# "unstage it": it stays staged, as every other staged file does.
+setup_left_out_repo() {
+    setup_repo_with_remote
+    seq 1 40 > "$WORK/f.txt"
+    git -C "$WORK" add f.txt
+    git -C "$WORK" commit -q -m base
+    git -C "$WORK" push -q origin "integration:$BASE_BRANCH"
+    git -C "$WORK" fetch -q origin
+    perl -pi -e 's/^3$/THREE/; s/^37$/THIRTYSEVEN/' "$WORK/f.txt"
+    echo new > "$WORK/new.txt"
+    git -C "$WORK" add f.txt new.txt
+}
+
+describe "agent mode: commit -i -p keeps a staged hunk it left out staged"
+setup_left_out_repo
+gl_capture commit -i -m msg -p --agent
+FP="$(json_fingerprint)"
+gl_capture commit -i -m msg -p --hunks f.txt:1 --hunks-from "$FP" --agent
+assert_exit_ok "$CODE" "loose_left_out_exit"
+assert_contains "$(show_patch HEAD)" "+THREE" "loose_left_out_committed_pick"
+assert_not_contains "$(show_patch HEAD)" "THIRTYSEVEN" "loose_left_out_not_committed"
+assert_contains "$(diff_patch --cached)" "+THIRTYSEVEN" "loose_left_out_still_staged"
+assert_contains "$(git -C "$WORK" diff --cached --name-status)" "A	new.txt" "loose_left_out_file_still_staged"
+
+describe "agent mode: commit -b -p keeps a staged hunk it left out staged"
+setup_left_out_repo
+gl_capture commit -b feat -m msg -p --agent
+FP="$(json_fingerprint)"
+gl_capture commit -b feat -m msg -p --hunks f.txt:1 --hunks-from "$FP" --agent
+assert_exit_ok "$CODE" "branch_left_out_exit"
+assert_contains "$(show_patch feat)" "+THREE" "branch_left_out_committed_pick"
+assert_not_contains "$(show_patch feat)" "THIRTYSEVEN" "branch_left_out_not_committed"
+assert_contains "$(diff_patch --cached)" "+THIRTYSEVEN" "branch_left_out_still_staged"
+assert_contains "$(git -C "$WORK" diff --cached --name-status)" "A	new.txt" "branch_left_out_file_still_staged"
+
+# The target, then a commit on top of it, then two staged hunks on f.txt.
+setup_left_out_fold() {
+    setup_left_out_repo
+    git -C "$WORK" commit -q -m target
+    echo other > "$WORK/other.txt"
+    git -C "$WORK" add other.txt
+    git -C "$WORK" commit -q -m on-top
+    perl -pi -e 's/^THREE$/THREE-C/; s/^THIRTYSEVEN$/THIRTYSEVEN-C/' "$WORK/f.txt"
+    git -C "$WORK" add f.txt
+}
+
+describe "agent mode: fold -p into HEAD keeps a staged hunk it left out staged"
+setup_left_out_fold
+gl_capture fold -p zz HEAD --agent
+FP="$(json_fingerprint)"
+gl_capture fold -p zz HEAD --hunks f.txt:1 --hunks-from "$FP" --agent
+assert_exit_ok "$CODE" "fold_head_left_out_exit"
+assert_contains "$(show_patch HEAD)" "+THREE-C" "fold_head_left_out_folded_pick"
+assert_not_contains "$(show_patch HEAD)" "THIRTYSEVEN-C" "fold_head_left_out_not_folded"
+assert_contains "$(diff_patch --cached)" "+THIRTYSEVEN-C" "fold_head_left_out_still_staged"
+
+describe "agent mode: fold -p into an older commit keeps a staged hunk it left out staged"
+setup_left_out_fold
+gl_capture fold -p zz HEAD~1 --agent
+FP="$(json_fingerprint)"
+gl_capture fold -p zz HEAD~1 --hunks f.txt:1 --hunks-from "$FP" --agent
+assert_exit_ok "$CODE" "fold_older_left_out_exit"
+assert_contains "$(git -C "$WORK" show HEAD~1:f.txt)" "THREE-C" "fold_older_left_out_folded_pick"
+assert_not_contains "$(git -C "$WORK" show HEAD~1:f.txt)" "THIRTYSEVEN-C" "fold_older_left_out_not_folded"
+assert_contains "$(diff_patch --cached)" "+THIRTYSEVEN-C" "fold_older_left_out_still_staged"
+
+# The left-out hunk rides in the paused commit's state, so it must come back
+# on `loom continue` and on `loom abort` alike. Conflict topology as in
+# test_commit.sh: the relocated commit's base is not the feature branch's.
+setup_left_out_conflict() {
+    setup_repo_with_remote
+    seq 1 40 > "$WORK/f.txt"
+    git -C "$WORK" add f.txt
+    git -C "$WORK" commit -q -m base
+    git -C "$WORK" push -q origin "integration:$BASE_BRANCH"
+    git -C "$WORK" fetch -q origin
+    create_feature_branch "g-left-out"
+    switch_to g-left-out
+    printf "feature\n" > "$WORK/shared.txt"
+    git -C "$WORK" add shared.txt
+    git -C "$WORK" commit -q -m "Feature commit"
+    switch_to integration
+    weave_branch "g-left-out"
+    printf "integration\n" > "$WORK/shared.txt"
+    git -C "$WORK" add shared.txt
+    git -C "$WORK" commit -q -m "Integration commit"
+    printf "feature-v2\n" > "$WORK/shared.txt"
+    perl -pi -e 's/^3$/THREE/; s/^37$/THIRTYSEVEN/' "$WORK/f.txt"
+    git -C "$WORK" add shared.txt f.txt
+}
+
+describe "agent mode: commit -p keeps a left-out hunk staged across a paused rebase"
+setup_left_out_conflict
+gl_capture commit -b g-left-out -m v2 -p --agent
+FP="$(json_fingerprint)"
+gl_capture commit -b g-left-out -m v2 -p --hunks f.txt:1 --hunks shared.txt:1 --hunks-from "$FP" --agent
+assert_state_file "left_out_pause_state"
+printf "resolved\n" > "$WORK/shared.txt"
+git -C "$WORK" add shared.txt
+gl_capture continue --agent
+printf "integration\n" > "$WORK/shared.txt"
+git -C "$WORK" add shared.txt
+gl_capture continue --agent
+assert_exit_ok "$CODE" "left_out_continue_exit"
+assert_no_state_file "left_out_continue_state_removed"
+assert_contains "$(diff_patch --cached)" "+THIRTYSEVEN" "left_out_continue_still_staged"
+assert_not_contains "$(show_patch g-left-out)" "THIRTYSEVEN" "left_out_continue_not_committed"
+
+describe "agent mode: commit -p abort puts back a left-out hunk staged"
+setup_left_out_conflict
+index_before="$(diff_patch --cached)"
+gl_capture commit -b g-left-out -m v2 -p --agent
+FP="$(json_fingerprint)"
+gl_capture commit -b g-left-out -m v2 -p --hunks f.txt:1 --hunks shared.txt:1 --hunks-from "$FP" --agent
+assert_state_file "left_out_abort_state"
+gl_capture abort --agent
+assert_exit_ok "$CODE" "left_out_abort_exit"
+assert_eq "$index_before" "$(diff_patch --cached)" "left_out_abort_index_restored"
+
+# The fixup is diffed against the commit on top, so moving it under that one
+# conflicts on g.txt.
+setup_left_out_fold_conflict() {
+    setup_left_out_repo
+    git -C "$WORK" commit -q -m base2
+    echo t > "$WORK/g.txt"
+    git -C "$WORK" add g.txt
+    git -C "$WORK" commit -q -m target
+    echo u > "$WORK/g.txt"
+    git -C "$WORK" commit -q -am on-top
+    echo v > "$WORK/g.txt"
+    perl -pi -e 's/^THREE$/THREE-C/; s/^THIRTYSEVEN$/THIRTYSEVEN-C/' "$WORK/f.txt"
+    git -C "$WORK" add g.txt f.txt
+}
+
+describe "agent mode: fold -p keeps a left-out hunk staged across a paused rebase"
+setup_left_out_fold_conflict
+gl_capture fold -p zz HEAD~1 --agent
+FP="$(json_fingerprint)"
+gl_capture fold -p zz HEAD~1 --hunks f.txt:1 --hunks g.txt:1 --hunks-from "$FP" --agent
+assert_state_file "fold_left_out_pause_state"
+while [ -f "$WORK/.git/loom/state.json" ]; do
+    echo v > "$WORK/g.txt"
+    git -C "$WORK" add g.txt
+    gl_capture continue --agent
+    [ "$CODE" = 0 ] || [ "$CODE" = 10 ] || [ -f "$WORK/.git/loom/state.json" ] || break
+done
+assert_exit_ok "$CODE" "fold_left_out_continue_exit"
+assert_contains "$(diff_patch --cached)" "+THIRTYSEVEN-C" "fold_left_out_continue_still_staged"
+assert_not_contains "$(git -C "$WORK" show HEAD~1:f.txt)" "THIRTYSEVEN-C" "fold_left_out_continue_not_folded"
+
+describe "agent mode: fold -p abort puts back a left-out hunk staged"
+setup_left_out_fold_conflict
+gl_capture fold -p zz HEAD~1 --agent
+FP="$(json_fingerprint)"
+gl_capture fold -p zz HEAD~1 --hunks f.txt:1 --hunks g.txt:1 --hunks-from "$FP" --agent
+assert_state_file "fold_left_out_abort_state"
+gl_capture abort --agent
+assert_exit_ok "$CODE" "fold_left_out_abort_exit"
+assert_contains "$(diff_patch --cached)" "+THIRTYSEVEN-C" "fold_left_out_abort_still_staged"
+assert_contains "$(cat "$WORK/f.txt")" "THREE-C" "fold_left_out_abort_pick_kept"
+
+# Unfiltered, so only what the picker returned keeps the rest out of the commit.
+describe "agent mode: commit -p leaves out a staged change its picker could not show"
+setup_repo_with_remote
+seq 1 40 > "$WORK/f.txt"
+printf '#!/bin/sh\necho hi\n' > "$WORK/m.sh"
+git -C "$WORK" add f.txt m.sh
+git -C "$WORK" commit -q -m base
+chmod +x "$WORK/m.sh"
+git -C "$WORK" add m.sh
+perl -pi -e 's/^3$/THREE/' "$WORK/f.txt"
+
+gl_capture commit -i -m msg -p --agent
+assert_not_contains "$OUT" "m.sh" "commit_modeonly_not_listed"
+FP="$(json_fingerprint)"
+
+gl_capture commit -i -m msg -p --hunks f.txt:1 --hunks-from "$FP" --agent
+assert_exit_ok "$CODE" "commit_modeonly_exit"
+assert_contains "$(show_patch HEAD)" "+THREE" "commit_modeonly_took_the_hunk"
+assert_eq "100644" "$(git -C "$WORK" ls-tree HEAD m.sh | awk '{print $1}')" "commit_modeonly_not_committed"
+assert_contains "$(git -C "$WORK" diff --cached --name-only)" "m.sh" "commit_modeonly_still_staged"
+
+describe "agent mode: commit -p lists a staged empty file"
+setup_repo_with_remote
+seq 1 40 > "$WORK/f.txt"
+git -C "$WORK" add f.txt
+git -C "$WORK" commit -q -m base
+: > "$WORK/empty.py"
+git -C "$WORK" add empty.py
+perl -pi -e 's/^3$/THREE/' "$WORK/f.txt"
+
+gl_capture commit -i -m msg -p --agent
+assert_contains "$OUT" '"id":"empty.py:1"' "commit_empty_listed"
+FP="$(json_fingerprint)"
+
+gl_capture commit -i -m msg -p --hunks empty.py:1 --hunks f.txt:1 --hunks-from "$FP" --agent
+assert_exit_ok "$CODE" "commit_empty_exit"
+assert_contains "$(git -C "$WORK" show HEAD --name-only --pretty=)" "empty.py" "commit_empty_committed"
+
+# The target commit is part of the fingerprint, so a moved HEAD is refused
+# rather than folded into whatever now sits there.
+describe "agent mode: fold -p over the working tree fingerprints its target"
+setup_two_hunk_commit
+perl -pi -e 's/^5$/FIVE/' "$WORK/multi.txt"
+gl_capture fold -p multi.txt HEAD --agent
+FP="$(json_fingerprint)"
+git -C "$WORK" commit -q --allow-empty -m "HEAD moved under the agent"
+
+gl_capture fold -p multi.txt HEAD --hunks multi.txt:1 --hunks-from "$FP" --agent
+assert_eq "1" "$CODE" "worktree_patch_moved_target_exit"
+assert_contains "$OUT" "The hunks changed since the listing" "worktree_patch_moved_target_msg"
+assert_not_contains "$(show_patch HEAD)" "+FIVE" "worktree_patch_moved_target_untouched"
+
+gl_capture fold -p multi.txt HEAD --agent -- --no-verify
+assert_contains "$OUT" "--hunks-from $(json_fingerprint) -- --no-verify" "worktree_patch_hint_git_args"
+
 describe "agent mode: fold -p with a branch target reports the source rule"
 gl_capture fold -p HEAD feature-a --agent
 assert_eq "1" "$CODE" "fold_branch_target_exit"
