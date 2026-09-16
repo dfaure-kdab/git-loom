@@ -150,3 +150,106 @@ fn worktree_with_a_gone_directory_is_ignored() {
     let outcome = weave_rebase(&t, &newbase).unwrap();
     assert!(matches!(outcome, RebaseOutcome::Completed));
 }
+
+/// A superproject with a real submodule at `sub`, whose git dir has been moved
+/// under `.git/modules/sub` the way `git submodule add` leaves it.
+fn setup_submodule_repo() -> (TestRepo, PathBuf) {
+    let t = TestRepo::new();
+    t.add_submodule("sub");
+    git::run_git(&t.workdir(), &["submodule", "absorbgitdirs", "sub"]).unwrap();
+    let sub = t.workdir().join("sub");
+    git::run_git(&sub, &["checkout", "-q", "-b", "integration"]).unwrap();
+    (t, sub)
+}
+
+#[test]
+fn submodule_own_worktree_is_exempt() {
+    // git lists a submodule's worktree at its git dir (`.git/modules/<path>`),
+    // not at the directory it is checked out in, so the exemption for the
+    // current worktree must not compare paths alone.
+    let (_t, sub) = setup_submodule_repo();
+
+    git::ensure_not_checked_out_elsewhere(&sub, &["integration".to_string()]).unwrap();
+}
+
+/// Add a linked worktree of the submodule, on a branch of its own.
+///
+/// It goes inside the superproject checkout: `TestRepo::new()` is the temp dir
+/// itself, so a sibling path would leak outside it and break re-runs.
+fn add_submodule_worktree(t: &TestRepo, sub: &Path) -> PathBuf {
+    let wt = t.workdir().join("subwt");
+    git::run_git(
+        sub,
+        &["worktree", "add", "-q", "-b", "other", wt.to_str().unwrap()],
+    )
+    .unwrap();
+    wt
+}
+
+#[test]
+fn a_submodules_linked_worktree_still_blocks_the_rewrite() {
+    // The exemption above must not stretch to every worktree of the submodule.
+    let (t, sub) = setup_submodule_repo();
+    let wt = add_submodule_worktree(&t, &sub);
+
+    let err = git::ensure_not_checked_out_elsewhere(&sub, &["other".to_string()])
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("other"), "{err}");
+    assert!(mentions_path(&err, &wt), "{err}");
+}
+
+#[test]
+fn a_submodules_linked_worktree_does_not_exempt_the_submodule_itself() {
+    // What the exemption rests on: from a linked worktree the git dir is
+    // `<common>/worktrees/<name>` and matches no listed path, so the
+    // submodule's own checkout stays blocked. The common dir would exempt it.
+    let (t, sub) = setup_submodule_repo();
+    let wt = add_submodule_worktree(&t, &sub);
+
+    let err = git::ensure_not_checked_out_elsewhere(&wt, &["integration".to_string()])
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("integration"), "{err}");
+}
+
+/// A `git init --separate-git-dir` checkout: the work tree under `parent`,
+/// with its git dir at `git_dir`, whose parent directory must already exist.
+fn init_separate_git_dir(parent: &Path, git_dir: &Path) -> PathBuf {
+    let work = parent.join("work");
+    git::run_git(
+        parent,
+        &[
+            "init",
+            "-q",
+            "-b",
+            "integration",
+            "--separate-git-dir",
+            git_dir.to_str().unwrap(),
+            work.to_str().unwrap(),
+        ],
+    )
+    .unwrap();
+    work
+}
+
+#[test]
+fn separate_git_dir_worktree_is_exempt() {
+    // Same listing quirk as a submodule, and here `core.worktree` is not set.
+    let tmp = tempfile::tempdir().unwrap();
+    let work = init_separate_git_dir(tmp.path(), &tmp.path().join("gitdir"));
+
+    git::ensure_not_checked_out_elsewhere(&work, &["integration".to_string()]).unwrap();
+}
+
+#[test]
+fn separate_git_dir_named_dot_git_is_exempt() {
+    // git strips the trailing `/.git`, so this one is listed at `elsewhere` —
+    // neither the checkout nor the git dir.
+    let tmp = tempfile::tempdir().unwrap();
+    let elsewhere = tmp.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let work = init_separate_git_dir(tmp.path(), &elsewhere.join(".git"));
+
+    git::ensure_not_checked_out_elsewhere(&work, &["integration".to_string()]).unwrap();
+}

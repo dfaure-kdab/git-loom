@@ -72,6 +72,15 @@ pub fn ensure_not_checked_out_elsewhere(workdir: &Path, branches: &[String]) -> 
     let current = workdir
         .canonicalize()
         .unwrap_or_else(|_| workdir.to_path_buf());
+    // git prints the main worktree at its git dir minus a trailing `/.git` —
+    // the checkout itself only when the git dir sits inside it (Spec 004).
+    // Never the common dir: from a linked worktree that would exempt the main
+    // worktree loom is not standing in.
+    let mut listed_as = super::absolute_git_dir(workdir)?;
+    if listed_as.file_name().is_some_and(|name| name == ".git") {
+        listed_as.pop();
+    }
+    let listed_as = listed_as.canonicalize().unwrap_or(listed_as);
 
     let mut blocked = Vec::new();
     for checkout in worktree_checkouts(workdir)? {
@@ -87,7 +96,7 @@ pub fn ensure_not_checked_out_elsewhere(workdir: &Path, branches: &[String]) -> 
             .path
             .canonicalize()
             .unwrap_or_else(|_| checkout.path.clone());
-        if canonical == current {
+        if canonical == current || canonical == listed_as {
             continue;
         }
         blocked.push(checkout);
