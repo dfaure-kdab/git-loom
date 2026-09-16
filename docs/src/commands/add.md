@@ -20,6 +20,8 @@ File arguments are optional: with none, `add` opens the same interactive hunk se
 
 | Option | Description |
 |--------|-------------|
+| `--hunks <id>` | Stage that hunk instead of opening the picker; repeat it per hunk, with `--hunks-from`. The ids are the whole selection: a staged hunk left out is unstaged — see [agent mode](agent.md). |
+| `--hunks-from <fingerprint>` | Fingerprint of the listing `--hunks` came from. Loom refuses a selection taken from a diff that has since changed. |
 | `-p, --patch` | Open the interactive hunk selector TUI |
 
 ### Git Options

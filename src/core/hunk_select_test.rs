@@ -47,6 +47,7 @@ fn picker(ids: &[&str], from: Option<&str>, whole_files: bool) -> Picker {
         command: "loom split ab -m <message> -p".to_string(),
         whole_files,
         target_hash: None,
+        git_args: String::new(),
     }
 }
 
@@ -226,4 +227,104 @@ fn has_selectable_follows_the_command_policy() {
     assert!(!has_selectable(&binary_only, false));
     assert!(has_selectable(&binary_only, true));
     assert!(has_selectable(&sample(), false));
+}
+
+/// A staged working-tree hunk starts selected, and `--hunks` is the whole
+/// answer, so an id left out of it comes back out of the index.
+#[test]
+fn apply_deselects_what_the_ids_leave_out() {
+    let mut entries = sample();
+    entries[0].hunks[0].selected = true;
+    let fp = fingerprint(OID, None, &entries);
+    apply(OID, &mut entries, &picker(&["src/a.rs:2"], Some(&fp), true)).unwrap();
+    assert!(!entries[0].hunks[0].selected);
+    assert!(entries[0].hunks[1].selected);
+}
+
+/// A refused selection leaves the entries alone: the caller stages from them.
+#[test]
+fn a_refused_selection_deselects_nothing() {
+    let mut entries = sample();
+    entries[0].hunks[0].selected = true;
+    let fp = fingerprint(OID, None, &entries);
+    apply(OID, &mut entries, &picker(&["src/a.rs:9"], Some(&fp), true)).unwrap_err();
+    assert!(entries[0].hunks[0].selected);
+}
+
+#[test]
+fn items_mark_an_already_staged_entry() {
+    let mut entries = sample();
+    entries[0].hunks[1].selected = true;
+    let listed = items(entries, true);
+    assert!(!listed[0].staged);
+    assert!(listed[1].staged);
+}
+
+#[test]
+fn a_worktree_picker_fingerprints_the_commit_it_lands_in() {
+    let with_target = worktree_picker(HunkArgs::default(), String::new(), Some("aaaa"), &[]);
+    let without = worktree_picker(HunkArgs::default(), String::new(), None, &[]);
+    assert_ne!(
+        fingerprint("", with_target.target_hash.as_deref(), &sample()),
+        fingerprint("", without.target_hash.as_deref(), &sample())
+    );
+}
+
+/// A working-tree file with one staged and one unstaged hunk, as listed.
+fn staged_then_changed() -> Vec<FileEntry> {
+    let mut f = file(
+        "f.txt",
+        &["@@ -3 +3 @@\n-3\n+333\n", "@@ -3 +3 @@\n-333\n+WT\n"],
+    );
+    f.hunks[0].origin = HunkOrigin::Staged;
+    f.hunks[0].selected = true;
+    f.hunks[1].origin = HunkOrigin::Unstaged;
+    f.hunks[1].hunk.modified_lines = vec![3];
+    vec![f]
+}
+
+/// `--hunks` unstages a staged entry left out, so a replay numbered before a
+/// `git add -p` would silently undo it.
+#[test]
+fn fingerprint_changes_when_an_entry_gets_staged() {
+    let mut entries = staged_then_changed();
+    let before = fingerprint(OID, None, &entries);
+    entries[0].hunks[0].origin = HunkOrigin::Unstaged;
+    assert_ne!(before, fingerprint(OID, None, &entries));
+}
+
+/// Unstaging reverse-applies to the index alone: the staged `333` exists
+/// nowhere else once the working tree changed it again.
+#[test]
+fn refuses_to_unstage_what_only_the_index_holds() {
+    let mut entries = staged_then_changed();
+    entries[0].hunks[0].selected = false;
+    let err = refuse_losing_index_content(&entries)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Keep `f.txt:1` staged"), "{err}");
+}
+
+#[test]
+fn keeping_a_staged_entry_selected_is_not_refused() {
+    refuse_losing_index_content(&staged_then_changed()).unwrap();
+}
+
+#[test]
+fn unstaging_lines_the_working_tree_left_alone_is_not_refused() {
+    let mut entries = staged_then_changed();
+    entries[0].hunks[0].selected = false;
+    entries[0].hunks[1].hunk = DiffHunk {
+        text: "@@ -37 +37 @@\n-37\n+WT\n".to_string(),
+        modified_lines: vec![37],
+    };
+    refuse_losing_index_content(&entries).unwrap();
+}
+
+#[test]
+fn unstaging_a_staged_binary_the_working_tree_changed_is_refused() {
+    let mut f = file("logo.png", &[BINARY_ENTRY, BINARY_ENTRY]);
+    f.hunks[0].origin = HunkOrigin::Staged;
+    f.hunks[1].origin = HunkOrigin::Unstaged;
+    assert!(refuse_losing_index_content(&[f]).is_err());
 }

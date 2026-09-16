@@ -248,11 +248,11 @@ mentions the skipped action in `messages`).
 
 | Command / prompt | Class | Agent-mode behavior |
 |---|---|---|
-| `commit` branch picker (no `-b`, no `-i`) | pre-flight | `needs_input` (select, `allow_other`) listing woven branches; hint: `loom commit -b <branch> -m <message> [files...]` (a new name creates the branch), or `-i` for the integration branch itself |
-| `commit` editor (no `-m`) | pre-flight | `needs_input` (text); hint: pass `-m <message>` |
+| `commit` branch picker (no `-b`, no `-i`) | pre-flight | `needs_input` (select, `allow_other`) listing woven branches; hint: `loom commit -b <branch> -m <message> [files...]` (a new name creates the branch), or `-i` for the integration branch itself. With `-p` it is raised before the hunk listing, and its hint keeps `-p` and the file filter: the branch prompt answered without them stages whole files, which would undo the picking |
+| `commit` editor (no `-m`) | pre-flight | `needs_input` (text); hint: pass `-m <message>`; with `-p` it keeps `-p` and the file filter |
 | `split` message editor (no `-m`) | pre-flight | `needs_input` (text); hint repeats the invocation with `-m <message>`, `-p` and the file filter included |
 | `split` file picker (no files, no `-p`) | pre-flight | `needs_input` (multiselect) listing the commit's files; hint: `loom split <target> -m <message> <files...>` |
-| `split -p` / `fold -p` hunk picker over a commit | pre-flight | `needs_input` (multiselect) listing the commit's hunks (see [Hunk selection](#hunk-selection)) |
+| any `-p` hunk picker | pre-flight | `needs_input` (multiselect) listing the hunks (see [Hunk selection](#hunk-selection)) |
 | `reword` commit editor (no `-m`) | pre-flight | `needs_input` (text); hint: pass `-m <message>` |
 | `reword` branch-rename prompt (no `-m`) | pre-flight | `needs_input` (text); hint: `loom reword <target> -m <new-name>` |
 | `drop` confirmations | pre-flight | `needs_confirmation`; hint: `loom drop <target> -y` |
@@ -266,28 +266,12 @@ mentions the skipped action in `messages`).
 | `branch merge` / `branch unmerge` / `switch` pickers | pre-flight | `needs_input` (select) listing candidates; hint: `loom branch merge <branch>` etc. |
 | `init` upstream picker (several candidates) | pre-flight | `needs_input` (select) listing the remote branches |
 
-### `-p` / `--patch`
-
-The hunk pickers are full-screen terminal UIs and cannot run in agent mode.
-Commands whose `-p` source is a commit answer it as data instead (see
-[Hunk selection](#hunk-selection)); the rest fail immediately — before anything
-is staged — with:
-
-```
---patch is interactive and unavailable in agent mode
-Pass explicit files instead
-```
-
-reported as `status: error`, exit code 1. This covers `add -p`, `commit -p`
-and `fold -p` over working-tree changes, which MUST use the same wording
-prefixed by `--patch over working-tree changes` in the `fold` case. A second
-guard at the picker itself backstops any future call path.
-
 ### Hunk selection
 
-`split -p`, `fold -p <source> <target>` and `fold -p <commit> zz` take their
-hunks from a commit, which does not change under them, so agent mode answers
-their picker with the hunk listing:
+The hunk pickers are full-screen terminal UIs, so agent mode answers every one
+of them with the hunk listing instead. This covers `add -p`, `commit -p` and
+all three `-p` forms of `fold`, plus `split -p`. A guard at the picker itself
+backstops any future call path, which MUST answer as data before reaching it.
 
 ```json
 {"status":"needs_input","kind":"multiselect","prompt":"Select hunks",
@@ -299,8 +283,27 @@ their picker with the hunk listing:
  "hint":"re-run with: loom fold -p c2 c1 --hunks <id> [--hunks <id>...] --hunks-from a91c3f2be417"}
 ```
 
-Listing a commit's hunks is pre-flight: nothing is staged, committed or
-rewritten. The agent re-runs the same command with the ids it picked.
+Listing hunks is pre-flight: nothing is staged, committed or rewritten. The
+agent re-runs the same command with the ids it picked.
+
+A source is either a **commit** (`split -p`, `fold -p <source> <target>`,
+`fold -p <commit> zz`) or the **working tree** (`add -p`, `commit -p`,
+`fold -p [<files>...] <commit>`). They differ in one way: a working-tree entry
+that is already staged starts selected, and `items` marks it `"staged": true`.
+`--hunks` replaces the selection wholesale — exactly as confirming the picker
+with those entries ticked. A staged id left out of it is unstaged by `add -p`;
+`commit -p` and `fold -p` keep it out of what they create and put it back
+staged afterwards, like any other staged work they set aside. A commit source
+has nothing selected to begin with, so there the two readings coincide.
+Unstaging reverse-applies to the index alone, so where it is for good — `add -p`
+and the TUI's `C` — leaving out a staged id or unticking it is refused when the
+working tree changed a line it adds again (or changed a staged binary at all):
+that content would exist nowhere afterwards. `commit -p` and `fold -p` need no
+such refusal, since what they put back carries the content itself.
+
+Applying a selection is all or nothing: a step that fails puts the index back.
+A picked hunk whose context a staged hunk being unstaged in the same file
+changes no longer applies, and is refused rather than placed by a looser match.
 
 - `items` lists every entry the picker itself would show, in that order,
   including the ones this command cannot take, so the ids it did not get are
@@ -316,13 +319,16 @@ rewritten. The agent re-runs the same command with the ids it picked.
   selection carrying that hunk fails the apply and rolls back.
   A listing is as large as the diff; narrow it with `<files>` on `split -p`.
 - `selectable` marks what this command can take, which differs per command: a
-  binary file has no hunk `fold` can move (Spec 007), while `split` takes it
-  whole (Spec 013), so only `fold` marks it `false`. A submodule entry and a
-  deletion are selectable in both: they travel whole.
+  binary file has no hunk a commit-source `fold` can move (Spec 007), while
+  `split` takes it whole (Spec 013) and a working-tree source stages it by
+  path, so only the commit-source `fold` forms mark it `false`. A submodule
+  entry and a deletion are selectable everywhere: they travel whole.
 - `options` repeats the selectable ids, so an agent reading only the common
   `needs_input` fields cannot pick a rejected one.
-- `fingerprint` digests both commits the operation touches and the whole
-  listing — paths and hunk texts, unselectable entries included. The target
+- `fingerprint` digests every commit the operation touches — the source it
+  lists and the target it lands in, including the target of
+  `fold -p [<files>...] <commit>` — and the whole listing: paths, hunk texts
+  and whether each is staged, unselectable entries included. The target
   matters because the replay re-resolves it from the revspec the agent typed,
   and a relative one can name a different commit by then.
 - A listing MUST have at least one selectable entry. A commit with none is an
@@ -332,7 +338,10 @@ rewritten. The agent re-runs the same command with the ids it picked.
 **CLI:**
 
 ```bash
+git-loom add -p [<files>...] --hunks <id> [--hunks <id>...] --hunks-from <fingerprint>
+git-loom commit -b <branch> -m <message> -p [<files>...] --hunks <id>... --hunks-from <fingerprint>
 git-loom split <target> -m <message> -p --hunks <id> [--hunks <id>...] --hunks-from <fingerprint>
+git-loom fold -p [<files>...] <commit> --hunks <id> [--hunks <id>...] --hunks-from <fingerprint>
 git-loom fold -p <source> <target> --hunks <id> [--hunks <id>...] --hunks-from <fingerprint>
 git-loom fold -p <commit> zz --hunks <id> [--hunks <id>...] --hunks-from <fingerprint>
 ```
@@ -351,7 +360,8 @@ commits. `-m <message>` stays a placeholder only in the prompt asking for it. On
 out makes the replay list a different set and fail the fingerprint check
 instead of working. The same rule applies to `split`'s missing-`-m` prompt,
 whose hint keeps `-p` and the filter rather than pointing at a file-level
-split.
+split. Forwarded git arguments (Spec 021) end every `-p` hint, after the
+selection flags, as `-- <git args>`.
 
 Ids are positional, so `--hunks-from` is what keeps a stale selection from
 moving whatever now sits at those positions. Recompute the fingerprint from the
@@ -363,10 +373,11 @@ current diff and refuse a mismatch — never resolve the ids against it:
 | Id absent from the diff | ``No hunk `<id>` in this diff`` |
 | Id not `<path>:<n>` with `n` plain digits from 1 | ``Invalid hunk id `<id>`⏎Ids look like `src/main.rs:1`` |
 | Id of an unselectable entry | ``` `fold -p` cannot move `<id>`: a binary file has no hunk ``` |
-| `--hunks` on `fold -p` over working-tree changes | ``--hunks only applies to a commit source⏎Use `loom fold -p <commit> <target>`, or pass explicit files`` |
+| Staged id left out, its lines changed again in the working tree | ``Unstaging `<id>` would lose what only the index holds: the working tree changed `<path>` there again⏎Keep `<id>` staged`` |
 
-Working-tree hunks have no listing: staged and unstaged entries for one file
-share the numbering and it shifts as soon as anything is staged.
+`commit -p` sets aside every staged path its picker did not return, and only
+once it returned a selection: every exit that carries none — a listing, a
+cancelled picker, a refused `--hunks` — leaves the index it was handed.
 
 ### Pager suppression
 

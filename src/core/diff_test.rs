@@ -140,3 +140,25 @@ fn build_hunk_patch_is_empty_when_nothing_survives() {
     }];
     assert_eq!(super::build_hunk_patch("f.txt", &hunks), "");
 }
+
+#[test]
+fn added_lines_count_the_new_side() {
+    let hunk = |text: &str| super::DiffHunk {
+        text: text.to_string(),
+        modified_lines: vec![],
+    };
+    assert_eq!(hunk("@@ -3 +3 @@\n-3\n+333\n").added_lines(), [3]);
+    assert_eq!(
+        hunk(
+            "@@ -9,4 +10,5 @@ fn a\n ctx\n-old\n+new\n+more\n ctx\n\\ No newline at end of file\n"
+        )
+        .added_lines(),
+        [11, 12]
+    );
+    assert_eq!(hunk("@@ -0,0 +1 @@\n+only\n").added_lines(), [1]);
+    assert_eq!(
+        hunk("@@ -5,2 +4,0 @@\n-a\n-b\n").added_lines(),
+        Vec::<usize>::new()
+    );
+    assert!(hunk(super::BINARY_ENTRY).added_lines().is_empty());
+}

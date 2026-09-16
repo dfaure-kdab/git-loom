@@ -71,6 +71,12 @@ pub fn diff_commit_file(workdir: &Path, oid: &str, path: &str) -> Result<String>
     )
 }
 
+/// The diff between two trees (`git diff --binary <from> <to>`); saved to be
+/// restored, like [`diff_cached`].
+pub fn diff_trees(workdir: &Path, from: &str, to: &str) -> Result<String> {
+    restore_stdout(workdir, &[from, to])
+}
+
 /// Get the whole staged diff, HEAD → index (`git diff --binary --cached`);
 /// saved to be restored, like [`diff_head`].
 pub fn diff_cached(workdir: &Path) -> Result<String> {

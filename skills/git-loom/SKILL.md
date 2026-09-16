@@ -28,9 +28,9 @@ Rules:
 1. Always pass `--agent` (or set `LOOM_AGENT=1`). Take the JSON status from the
    **last line** of stdout, never the whole stream: `show`, `diff`, `trace`
    and `absorb` print their own output there first.
-2. Use `-p`/`--patch` only on `split` and `fold` with a commit source, where it
-   answers with a hunk listing (see Hunk selection). On `add`, `commit`, and
-   `fold` over working-tree changes it opens a full-screen UI and is rejected.
+2. `-p`/`--patch` works everywhere: it answers with a hunk listing rather than
+   opening the picker (see Hunk selection). Reach for it whenever two logical
+   changes share one file.
 3. Always pass `-m <message>` to `commit`, `split`, and commit `reword`. For
    `commit`, explicitly choose `-b <branch>` or integration branch `-i`.
 4. Name files explicitly. Never use `zz`, except as the destination in
@@ -106,18 +106,28 @@ The `graph` fields:
 
 ## Hunk selection
 
-When two logical changes share a file, `-p` works at hunk level:
-`git loom split <commit> -m "<msg>" -p`, `git loom fold -p <source> <target>`,
-`git loom fold -p <commit> zz`. Each takes two calls.
+When two logical changes share a file, `-p` works at hunk level — on the
+working tree (`git loom add -p <files>`, `git loom commit -b <b> -m "<msg>" -p
+<files>`, `git loom fold -p <files> <commit>`) and on a commit
+(`git loom split <commit> -m "<msg>" -p`, `git loom fold -p <source> <target>`,
+`git loom fold -p <commit> zz`). Each takes two calls.
 
 The first returns `needs_input` / exit 10 with `items` (one per hunk: `id`,
-`path`, `diff`, `selectable`) and a `fingerprint`. Nothing changed. Pick the
-ids you want and re-run the command the `hint` gives, adding
-`--hunks <id>` once per id, plus `--hunks-from <fingerprint>`.
+`path`, `diff`, `selectable`, and `staged` when it already is) and a
+`fingerprint`. Nothing changed. Pick the ids you want and re-run the command
+the `hint` gives, adding `--hunks <id>` once per id, plus
+`--hunks-from <fingerprint>`.
 
-- `selectable: false` marks an entry this command cannot take — a binary file
-  under `fold`. A deletion and a submodule move whole; `split` takes them all
-  whole. `options` already lists only the pickable ids.
+- `--hunks` is the **whole** selection. On a working-tree source, an id marked
+  `staged: true` that you leave out is unstaged by `add -p` — list it again to
+  keep it — and kept staged but out of the result by `commit -p` and `fold -p`.
+  `add -p` refuses to leave one out when the working tree changed its lines
+  again.
+- `selectable: false` marks an entry this command cannot take: only a binary
+  file, under a commit-source `fold`. That `fold` still takes a deletion or a
+  submodule, moved whole. `split` and every working-tree source take any
+  whole-file entry (binary, deleted, empty, submodule), staged whole.
+  `options` already lists only the pickable ids.
 - The fingerprint is checked against the current diff and a mismatch is
   refused, because ids are positional. Re-list rather than reusing an old one.
 - Re-run the whole `hint`, including any `<files>` filter: dropping one changes

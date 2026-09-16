@@ -191,9 +191,16 @@ enum Command {
         /// Files to stage (short IDs, filenames, or 'zz' for all)
         #[arg(num_args = 0..)]
         files: Vec<String>,
-        /// Interactively select hunks to stage
+        /// Select hunks to stage: a picker, or `--hunks` from its listing
         #[arg(short = 'p', long = "patch")]
         patch: bool,
+        /// Hunk ids from a `-p` listing, instead of picking them interactively
+        // Comma-splitting happens in `hunk_select`; see `fold`.
+        #[arg(long = "hunks", requires = "patch", requires = "hunks_from")]
+        hunks: Vec<String>,
+        /// Fingerprint of the listing `--hunks` was taken from
+        #[arg(long = "hunks-from", requires = "hunks")]
+        hunks_from: Option<String>,
         /// Arguments forwarded verbatim to `git add` (everything after `--`)
         #[arg(last = true, num_args = 0.., allow_hyphen_values = true, value_name = "GIT_ARG")]
         git_args: Vec<String>,
@@ -212,9 +219,16 @@ enum Command {
         /// Commit message (if not provided, opens editor)
         #[arg(short, long)]
         message: Option<String>,
-        /// Interactively select hunks to stage before committing
+        /// Select hunks to stage before committing: a picker, or `--hunks`
         #[arg(short = 'p', long = "patch")]
         patch: bool,
+        /// Hunk ids from a `-p` listing, instead of picking them interactively
+        // Comma-splitting happens in `hunk_select`; see `fold`.
+        #[arg(long = "hunks", requires = "patch", requires = "hunks_from")]
+        hunks: Vec<String>,
+        /// Fingerprint of the listing `--hunks` was taken from
+        #[arg(long = "hunks-from", requires = "hunks")]
+        hunks_from: Option<String>,
         /// Files to stage (short IDs, filenames, or 'zz' for all), none for all tracked changes
         files: Vec<String>,
         /// Arguments forwarded verbatim to `git commit` (everything after `--`)
@@ -227,7 +241,7 @@ enum Command {
         /// Create a new branch from the source commit(s) and move them there
         #[arg(short = 'c', long = "create")]
         create: bool,
-        /// Interactively select hunks to stage before folding
+        /// Select hunks to fold: a picker, or `--hunks` from its listing
         #[arg(short = 'p', long = "patch", conflicts_with = "create")]
         patch: bool,
         /// Move the source commit(s) directly above this commit
@@ -266,7 +280,7 @@ enum Command {
         /// Message for the first commit (prompts if omitted)
         #[arg(short, long)]
         message: Option<String>,
-        /// Interactively pick hunks for the first commit
+        /// Pick hunks for the first commit: a picker, or `--hunks`
         #[arg(short = 'p', long = "patch")]
         patch: bool,
         /// Hunk ids from a `-p` listing, instead of picking them interactively
@@ -582,16 +596,6 @@ fn main() {
         }
     }
 
-    // `add` and `commit` pick hunks from the working tree, which has no listing
-    // (spec 019), so their `-p` is rejected outright — before either stages
-    // anything. A guard at the picker itself backstops future call paths.
-    if agent_mode::enabled() && rejects_patch_in_agent_mode(&cli.command) {
-        finish_and_exit(Err(anyhow::anyhow!(
-            "--patch is interactive and unavailable in agent mode\n\
-             Pass explicit files instead"
-        )));
-    }
-
     // The status TUI is a full-screen terminal UI — same rule as the hunk
     // pickers (a guard in tui::app::run backstops future call paths).
     if agent_mode::enabled() && matches!(cli.command, Some(Command::Tui)) {
@@ -615,8 +619,16 @@ fn main() {
         Some(Command::Add {
             files,
             patch,
+            hunks,
+            hunks_from,
             git_args,
-        }) => add::run(files, patch, git_args, &theme),
+        }) => add::run(
+            files,
+            patch,
+            HunkArgs::new(hunks, hunks_from),
+            git_args,
+            &theme,
+        ),
         Some(Command::Switch { branch }) => switch::run(branch),
         Some(Command::Branch(cmd)) => match cmd.action {
             Some(BranchAction::New(args)) => branch::new::run(args.name, args.target),
@@ -630,9 +642,19 @@ fn main() {
             integration,
             message,
             patch,
+            hunks,
+            hunks_from,
             files,
             git_args,
-        }) => commit::run(branch, integration, message, patch, files, git_args, &theme),
+        }) => commit::run(
+            branch,
+            integration,
+            message,
+            patch.then_some(HunkArgs::new(hunks, hunks_from)),
+            files,
+            git_args,
+            &theme,
+        ),
         Some(Command::Swap { a, b }) => swap::run(a, b),
         Some(Command::Drop { targets, yes }) => drop::run(targets, yes),
         Some(Command::Absorb { dry_run, files }) => absorb::run(dry_run, files),
@@ -699,17 +721,6 @@ fn main() {
     trace::finalize();
 
     finish_and_exit(result);
-}
-
-/// Whether `-p`/`--patch` has no non-interactive answer for this command.
-///
-/// `fold` and `split` list their hunks as data instead (spec 019); they reject
-/// the forms they cannot list themselves.
-fn rejects_patch_in_agent_mode(command: &Option<Command>) -> bool {
-    matches!(
-        command,
-        Some(Command::Add { patch: true, .. }) | Some(Command::Commit { patch: true, .. })
-    )
 }
 
 /// Report the command result and exit.

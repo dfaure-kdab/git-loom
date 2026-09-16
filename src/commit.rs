@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::agent_mode;
 use crate::core::changeid;
 use crate::core::graph;
+use crate::core::hunk_select::{self, HunkArgs};
 use crate::core::msg;
 use crate::core::repo;
 use crate::core::staging::{self, StagedAside};
@@ -42,19 +43,29 @@ pub fn run(
     branch: Option<String>,
     integration: bool,
     message: Option<String>,
-    patch: bool,
+    patch: Option<HunkArgs>,
     files: Vec<String>,
     git_args: Vec<String>,
     theme: &graph::Theme,
 ) -> Result<()> {
+    let git_opts: Vec<&str> = git_args.iter().map(String::as_str).collect();
+
     // Without -m the commit would open $GIT_EDITOR, which hangs a headless agent.
     if agent_mode::enabled() && message.is_none() {
+        let command = if patch.is_some() {
+            hunk_select::patch_command("loom commit -m <message> [-b <branch> | -i]", &files)
+        } else {
+            "loom commit -m <message> [-b <branch> | -i] [files...]".to_string()
+        };
         return Err(agent_mode::respond_needs_input(
             agent_mode::InputKind::Text,
             "Commit message",
             vec![],
             false,
-            "re-run with: loom commit -m <message> [-b <branch> | -i] [files...]",
+            &format!(
+                "re-run with: {command}{}",
+                hunk_select::git_args_suffix(&git_opts)
+            ),
         ));
     }
 
@@ -75,6 +86,30 @@ pub fn run(
         || (branch.is_none()
             && info.branch_name == repo::upstream_local_branch(&info.upstream.label));
 
+    // Ask for the branch before `-p` stages anything: the branch prompt fires
+    // after staging, and answering it re-runs the command, which without `-p`
+    // stages whole files and undoes the picking.
+    if agent_mode::enabled() && patch.is_some() && !loose && branch.is_none() {
+        let hint = format!(
+            "re-run with: {}{} (a new name creates the branch), \
+             or -i for the integration branch itself",
+            hunk_select::patch_command(
+                &format!("loom commit -b <branch> -m {}", message_arg(&message)),
+                &files,
+            ),
+            hunk_select::git_args_suffix(&git_opts)
+        );
+        ask_branch_name(&info, &hint)?;
+        bail!("agent mode must answer the branch prompt");
+    }
+
+    // Resolved once, before staging: a bad `-b` would leave the index changed,
+    // and staging can shift the short ID it was typed as.
+    let explicit_branch = match &branch {
+        Some(b) => Some(check_explicit_branch(&repo, &info, &workdir, b)?),
+        None => None,
+    };
+
     // The index exactly as the user left it: what `loom abort` and a refused
     // rebase have to put back, since the reset below them undoes the commit
     // and leaves its content unstaged. A whole staged binary rides along into
@@ -85,6 +120,9 @@ pub fn run(
         git::diff_cached(&workdir)?
     };
 
+    // The replay hints repeat what the agent typed, not the stamped message.
+    let replay_message = message_arg(&message);
+
     // Stamp before the index is touched: nothing below may fail without
     // restoring what `resolve_staging` sets aside, and this can (`git var`).
     let message = match &message {
@@ -92,17 +130,27 @@ pub fn run(
         None => None,
     };
 
-    // Stage files, saving aside any pre-existing staged files not in the
-    // target list so they don't accidentally end up in this commit.
-    let staged_aside = if patch {
-        resolve_staging_patch(&repo, &workdir, &files, theme)?
+    // Stage files, saving aside any pre-existing staged file this commit must
+    // not take.
+    let staged_aside = if let Some(hunks) = patch {
+        // The listing tells the agent to repeat this invocation (spec 019), so
+        // it names the branch only when this one did: inventing `-i` would send
+        // the replay to the integration branch instead of the branch prompt.
+        let target = match (&branch, integration) {
+            (Some(name), _) => format!(" -b {}", hunk_select::quoted(name)),
+            (None, true) => " -i".to_string(),
+            (None, false) => String::new(),
+        };
+        let command =
+            hunk_select::patch_command(&format!("loom commit{target} -m {replay_message}"), &files);
+        let picker = hunk_select::worktree_picker(hunks, command, None, &git_opts);
+        resolve_staging_patch(&repo, &workdir, &picker, &files, theme)?
     } else {
         resolve_staging(&repo, &workdir, &files)?
     };
 
     repo::verify_has_staged_changes(&repo)?;
 
-    let git_opts: Vec<&str> = git_args.iter().map(String::as_str).collect();
     let do_commit = || -> Result<()> {
         let head_before = repo::head_oid(&repo).ok();
         git::commit_opts(&workdir, message.as_deref(), &git_opts)?;
@@ -138,7 +186,7 @@ pub fn run(
     // Returns whether the branch was newly created — only newly-created
     // branches are deleted on rollback (not pre-existing empty ones).
     let (branch_name, branch_is_new) =
-        resolve_branch_target(&repo, &info, &workdir, branch.as_deref())?;
+        resolve_branch_target(&repo, &info, &workdir, explicit_branch)?;
 
     // Empty branches (pointing at merge-base) need a branch section and
     // merge entry created in the Weave before moving the commit there.
@@ -246,30 +294,35 @@ fn post_commit(workdir: &Path, branch_name: &str) -> Result<()> {
 
 /// Resolve staging in patch mode: open the interactive hunk picker.
 ///
-/// With specific files, other staged files are saved aside and unstaged first,
-/// so they neither show in the picker nor leak into this commit. Returns that
-/// saved patch for restoration after the commit; a picker that is cancelled or
-/// fails puts it back and errors.
+/// Once the picker has run, every staged path it did not return is saved aside
+/// and unstaged, so it cannot leak into this commit. Returns that saved patch
+/// for restoration after the commit. An exit without a selection — cancelled,
+/// refused, or answered as a listing — sets nothing aside.
 fn resolve_staging_patch<'a>(
     repo: &Repository,
     workdir: &'a Path,
+    picker: &hunk_select::Picker,
     files: &[String],
     theme: &graph::Theme,
 ) -> Result<StagedAside<'a>> {
-    // Save aside other staged files when specific files are targeted.
     let filter = staging::filter_paths(repo, files)?;
-    let saved_staged = match &filter {
-        Some(paths) => {
-            let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
-            staging::save_and_unstage_other_staged(repo, workdir, &path_refs)?
-        }
-        None => StagedAside::none(workdir),
-    };
-
-    if staging::run_hunk_picker(repo, workdir, filter.as_deref(), theme)?.is_none() {
+    let Some(picked) = staging::run_hunk_picker(
+        repo,
+        workdir,
+        filter.as_deref(),
+        picker,
+        staging::LeftOut::KeptStaged,
+        theme,
+    )?
+    else {
         return Err(msg::cancelled());
-    }
-    Ok(saved_staged)
+    };
+    // Set aside every staged path the picker did not return, not just those
+    // outside the filter: one with no hunk to show, such as a mode-only change,
+    // was never offered, so it must not join the commit.
+    // What the pick left out stays staged too, though not in the commit.
+    let paths: Vec<&str> = picked.paths.iter().map(String::as_str).collect();
+    Ok(staging::save_and_unstage_other_staged(repo, workdir, &paths)?.absorb(picked.left_out))
 }
 
 /// Resolve staging from the file arguments: an empty list uses the index
@@ -309,24 +362,29 @@ fn resolve_file_args(repo: &Repository, files: &[String]) -> Result<Vec<String>>
 ///
 /// Returns `(branch_name, is_new)` — `is_new` is true when the branch was
 /// created by this call (only newly-created branches are deleted on rollback).
+///
+/// `explicit` is `check_explicit_branch`'s answer for `-b`: a new name is
+/// created at the merge-base here.
 fn resolve_branch_target(
     repo: &Repository,
     info: &repo::RepoInfo,
     workdir: &std::path::Path,
-    branch: Option<&str>,
+    explicit: Option<(String, bool)>,
 ) -> Result<(String, bool)> {
-    match branch {
-        Some(b) => resolve_explicit_branch(repo, info, workdir, b),
+    match explicit {
+        Some((name, is_new)) => {
+            if is_new {
+                create_branch_at_merge_base(workdir, &name, info.upstream.merge_base_oid)?;
+            }
+            Ok((name, is_new))
+        }
         None => pick_branch(repo, info, workdir),
     }
 }
 
-/// Resolve an explicit branch argument.
-///
-/// - Known woven branch (by name or short ID): use it
-/// - Known branch but not woven: error
-/// - Unknown: treat as new branch name, validate, create at merge-base, weave
-fn resolve_explicit_branch(
+/// Every refusal `-b` can get, without creating anything: the branch name and
+/// whether it is new.
+fn check_explicit_branch(
     repo: &Repository,
     info: &repo::RepoInfo,
     workdir: &std::path::Path,
@@ -354,19 +412,21 @@ fn resolve_explicit_branch(
                     name
                 );
             }
-
-            create_branch_at_merge_base(workdir, &name, info.upstream.merge_base_oid)?;
             Ok((name, true))
         }
     }
 }
 
-/// Interactive branch picker: select an existing woven branch or type a new name.
-fn pick_branch(
-    repo: &Repository,
-    info: &repo::RepoInfo,
-    workdir: &std::path::Path,
-) -> Result<(String, bool)> {
+/// The `-m <message>` a replay hint repeats. Only agent mode reads one, and it
+/// guarantees `-m`, so the placeholder fills a string nothing prints.
+fn message_arg(message: &Option<String>) -> String {
+    hunk_select::quoted(message.as_deref().unwrap_or("<message>"))
+}
+
+/// Ask for the target branch: pick a woven one, or type a new name.
+///
+/// In agent mode this always errors, answering with the prompt (`msg::input`).
+fn ask_branch_name(info: &repo::RepoInfo, hint: &str) -> Result<String> {
     let branch_names: Vec<String> = info.branches.iter().map(|b| b.name.clone()).collect();
 
     let not_empty = |s: &str| {
@@ -377,23 +437,27 @@ fn pick_branch(
         }
     };
 
+    if branch_names.is_empty() {
+        msg::input("Branch name", hint, not_empty)
+    } else {
+        msg::select_or_input("Select target branch", branch_names, hint, not_empty)
+    }
+}
+
+/// Interactive branch picker: select an existing woven branch or type a new name.
+fn pick_branch(
+    repo: &Repository,
+    info: &repo::RepoInfo,
+    workdir: &std::path::Path,
+) -> Result<(String, bool)> {
     let hint = "re-run with: loom commit -b <branch> -m <message> [files...] \
                 (a new name creates the branch), or -i for the integration branch itself";
-    let name = if branch_names.is_empty() {
-        msg::input("Branch name", hint, not_empty)?
-    } else {
-        msg::select_or_input(
-            "Select target branch",
-            branch_names.clone(),
-            hint,
-            not_empty,
-        )?
-    };
+    let name = ask_branch_name(info, hint)?;
 
     let name = name.trim().to_string();
 
     // If user typed a name that isn't an existing woven branch, create it
-    if !branch_names.contains(&name) {
+    if !info.branches.iter().any(|b| b.name == name) {
         git::branch_validate_name(workdir, &name)?;
         repo::ensure_branch_not_exists(repo, &name)?;
         create_branch_at_merge_base(workdir, &name, info.upstream.merge_base_oid)?;

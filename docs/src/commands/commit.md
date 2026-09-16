@@ -17,6 +17,8 @@ Alias: `ci`
 | `-b, --branch <branch>` | Target feature branch (name or short ID). Prompts if omitted. |
 | `-i, --integration` | Commit to the integration branch itself (loose commit), skipping the branch prompt. Mutually exclusive with `-b`. |
 | `-m, --message <message>` | Commit message. Opens editor if omitted. |
+| `--hunks <id>` | Stage that hunk instead of opening the picker; repeat it per hunk, with `--hunks-from`. The ids are the whole selection — see [agent mode](agent.md). |
+| `--hunks-from <fingerprint>` | Fingerprint of the listing `--hunks` came from. Loom refuses a selection taken from a diff that has since changed. |
 | `-p, --patch` | Interactively select hunks to stage before committing. |
 
 ### File Arguments

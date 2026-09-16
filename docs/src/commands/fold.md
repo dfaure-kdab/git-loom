@@ -22,7 +22,7 @@ When only a target is given, currently staged files are folded into the target c
 | Option | Description |
 |--------|-------------|
 | `-p, --patch` | Interactively select hunks before folding. Three forms depending on argument types (see below). Cannot be combined with `-c`, which moves whole commits. |
-| `--hunks <id>` | Select that hunk instead of opening the picker, for the two commit-source forms; repeat it per hunk. Needs `-p` and `--hunks-from`; see [agent mode](agent.md). |
+| `--hunks <id>` | Select that hunk instead of opening the picker, in any `-p` form; repeat it per hunk. Needs `-p` and `--hunks-from`; see [agent mode](agent.md). |
 | `--hunks-from <fingerprint>` | Fingerprint of the listing `--hunks` came from. Loom refuses a selection taken from a diff that has since changed. |
 | `-c, --create` | Create a new branch and move the source commit(s) into it. |
 | `--above <commit>` | Move the source commit(s) directly above (newer than) this commit. |
@@ -137,7 +137,7 @@ git loom fold -p osy
 # Selected hunks are staged and folded into commit osy
 ```
 
-A picked binary or deleted file is staged whole here, the way [`split -p`](split.md) does.
+A picked binary or deleted file is staged whole here, the way [`split -p`](split.md) does. `--hunks` works here too, and is the whole selection: a hunk you had staged and leave out is not folded, and stays staged.
 
 Provide file arguments before the target to narrow the picker:
 

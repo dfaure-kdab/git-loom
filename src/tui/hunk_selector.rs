@@ -537,15 +537,14 @@ pub fn run_hunk_selector(files: Vec<FileEntry>, theme: TuiTheme) -> Result<Optio
     Ok(confirmed(app, verdict))
 }
 
-/// Backstop for agent mode. `add`/`commit` are rejected at dispatch and the
-/// commit-source pickers answer with a listing before they get here, but no
-/// call path may open a full-screen TUI either. Every entry point goes through
-/// this, nested ones included.
+/// Backstop for agent mode: every `-p` path answers with a hunk listing before
+/// it gets here, and no call path may open a full-screen TUI either. Every
+/// entry point goes through this, nested ones included.
 fn refuse_in_agent_mode() -> Result<()> {
     if crate::core::agent_mode::enabled() {
         anyhow::bail!(
-            "--patch is interactive and unavailable in agent mode\n\
-             Pass explicit files instead"
+            "the hunk picker is a full-screen UI and cannot run in agent mode\n\
+             This path should have answered with a hunk listing (spec 019)"
         );
     }
     Ok(())

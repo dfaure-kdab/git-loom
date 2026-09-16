@@ -64,7 +64,7 @@ The global `--agent` flag (or the `LOOM_AGENT` environment variable, any value e
 In agent mode:
 
 - Interactive prompts never render — they answer `needs_input`/`needs_confirmation` instead.
-- `-p`/`--patch` answers with a hunk listing on [`split`](split.md) and on [`fold`](fold.md) with a commit source (see below); everywhere else it is rejected, since the picker is a full-screen UI.
+- `-p`/`--patch` answers with a hunk listing instead of opening the picker (see below) — on [`add`](add.md), [`commit`](commit.md), [`fold`](fold.md) and [`split`](split.md) alike.
 - `commit`, `split`, and `reword` require `-m` (no editor is opened).
 - `push` never opens a browser: PR creation is skipped and reported in `messages`.
 - `update` skips the gone-branch pruning question (use `-y` to prune).
@@ -104,7 +104,7 @@ git loom commit --agent -b feature-auth -m "Fix login"
 
 ### Picking hunks without the picker
 
-`split -p`, `fold -p <source> <target>` and `fold -p <commit> zz` take their hunks from a commit, so agent mode can list them instead of drawing the picker. It takes two calls: the first lists, the second selects.
+Every `-p` form lists its hunks instead of drawing the picker. It takes two calls: the first lists, the second selects.
 
 ```bash
 git loom split ab --agent -m "Fix the off-by-one" -p
@@ -133,7 +133,9 @@ git loom split ab --agent -m "..." -p --hunks src/parse.rs:1 --hunks-from 35374d
 
 `--hunks` repeats, once per id, and takes no separated list: an id contains a path, and any separator is a character some path may hold. A comma-joined value errors and says so.
 
-`--hunks` needs `-p` and works outside agent mode too, though the fingerprint only comes from a listing, so the first call still needs `--agent` or `LOOM_AGENT=1`. Working-tree hunks have no listing: staged and unstaged entries for one file share the numbering, and it shifts as soon as anything is staged.
+`--hunks` is the **whole** selection, exactly as confirming the picker with those entries ticked. That matters for a working-tree source (`add -p`, `commit -p`, `fold -p <files> <commit>`), where an already-staged hunk starts selected and is marked `"staged": true` in the listing: leave its id out and `add -p` unstages it, while `commit -p` and `fold -p` leave it out of what they create and keep it staged. For `add -p`, leaving it out is refused when the working tree changed those lines again, since the staged version then exists only in the index. A commit source has nothing selected to begin with, so there the distinction does not arise.
+
+`--hunks` needs `-p` and works outside agent mode too, though the fingerprint only comes from a listing, so the first call still needs `--agent` or `LOOM_AGENT=1`.
 
 ### A conflicting update
 

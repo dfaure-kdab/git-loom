@@ -6,6 +6,7 @@
 
 ```bash
 git-loom commit [-b <branch> | -i] [-m <message>] [-p] [files...] [-- <git args>...]
+git-loom commit [-b <branch> | -i] -m <message> -p [files...] --hunks <id>... --hunks-from <fingerprint>
 ```
 
 | Input | Meaning |
@@ -13,7 +14,8 @@ git-loom commit [-b <branch> | -i] [-m <message>] [-p] [files...] [-- <git args>
 | `-b, --branch <branch>` | Existing woven branch name/short ID, or new branch name. |
 | `-i, --integration` | Loose commit directly on integration; mutually exclusive with `-b`. |
 | `-m, --message <message>` | Message; without it open the Git editor. |
-| `-p, --patch` | Interactively select hunks to stage (picker defined by Spec 007). |
+| `-p, --patch` | Select hunks to stage (picker defined by Spec 007), interactively or with `--hunks`. |
+| `--hunks <id>` (repeated), `--hunks-from <fingerprint>` | Supply the `-p` selection by id; the ids are the whole selection, so a staged hunk left out is kept out of the commit and stays staged (Spec 019). Requires `-p`, and each flag requires the other. |
 | `[files...]` | File short IDs, paths, or reserved `zz`. |
 | `-- <git args>...` | Forward untouched to `git commit`, not relocation rebase (for example `--no-verify`, `--signoff`, `-S`, `--author=...`; Spec 021). |
 
@@ -22,7 +24,8 @@ Staging rules:
 - no file arguments: preserve/use the existing index;
 - `zz`: `git add -A` for all unstaged changes;
 - IDs/paths: stage only resolved files;
-- `zz` anywhere wins over every other file argument.
+- `zz` anywhere wins over every other file argument;
+- `-p`: commit only what the picker kept. A staged hunk it left out, and every other staged path — outside the filter, or with no hunk to show such as a mode-only change — is set aside and stays staged.
 
 File paths may be relative or absolute; resolution follows Spec 002.
 
@@ -61,6 +64,8 @@ Resolve `-b` with `resolve_arg(..., [Branch])` (Spec 002):
 - existing non-woven branch: error exactly `Branch '<name>' is not woven into the integration branch.`;
 - no existing match: treat as a new name, validate by Spec 005, create it at the weave base, then weave it;
 - commit/file target: reject with `Commit target must be a branch.`.
+
+Every `-b` refusal comes before staging, so it leaves the index untouched; a new branch is created only after staging.
 
 Without `-b`/`-i` when loose-mode name matching does not apply, show a picker of woven branches plus “create new branch.” If none exist, prompt directly to create one.
 

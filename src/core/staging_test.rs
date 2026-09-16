@@ -1,5 +1,6 @@
 use super::{
-    binary_stamp, collect_file_entries, filter_paths, save_and_unstage_staged, selected_paths,
+    binary_stamp, collect_file_entries, filter_paths, put_index_back, save_and_unstage_staged,
+    selected_paths,
 };
 use crate::core::diff::DiffHunk;
 use crate::core::repo;
@@ -264,4 +265,30 @@ fn a_submodule_is_stamped_with_its_checked_out_commit() {
         collect_file_entries(&test_repo.repo, &workdir, Some(&["sub".to_string()])).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(binary_stamp(&workdir, &entries), vec![Some(second)]);
+}
+
+/// A lock another git holds is theirs: the restore misses rather than race it.
+#[test]
+fn putting_the_index_back_goes_through_its_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = dir.path().join("index");
+    let lock = dir.path().join("index.lock");
+    std::fs::write(&index, b"now").unwrap();
+
+    assert!(put_index_back(&index, Some(b"before")));
+    assert_eq!(std::fs::read(&index).unwrap(), b"before");
+    assert!(!lock.exists());
+
+    std::fs::write(&lock, b"theirs").unwrap();
+    assert!(!put_index_back(&index, Some(b"again")));
+    assert_eq!(std::fs::read(&index).unwrap(), b"before");
+    assert_eq!(std::fs::read(&lock).unwrap(), b"theirs");
+    std::fs::remove_file(&lock).unwrap();
+
+    assert!(put_index_back(&index, None));
+    assert!(!index.exists() && !lock.exists());
+    assert!(
+        put_index_back(&index, None),
+        "no index to remove is no miss"
+    );
 }
