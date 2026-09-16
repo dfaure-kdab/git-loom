@@ -3,7 +3,7 @@ use git2::Repository;
 use std::path::Path;
 
 use crate::core::diff::{self, parse_hunk_start};
-use crate::core::repo::{self, Target, TargetKind};
+use crate::core::repo;
 use crate::core::{graph, msg};
 use crate::git;
 use crate::tui::hunk_selector::{FileEntry, HunkEntry, HunkOrigin};
@@ -11,58 +11,71 @@ use crate::tui::theme::TuiTheme;
 
 /// Open the interactive hunk picker for the given files (or all if empty / `zz`).
 ///
-/// Returns `true` if the user confirmed, `false` if they cancelled.
+/// Returns the paths the picker staged — those with a selected hunk — or
+/// `None` if it was cancelled. Never a path the picker did not show (Spec 007).
 pub fn run_hunk_picker(
     repo: &Repository,
     workdir: &Path,
-    files: &[String],
+    filter: Option<&[String]>,
     theme: &graph::Theme,
-) -> Result<bool> {
-    let entries = collect_file_entries(repo, workdir, files)?;
+) -> Result<Option<Vec<String>>> {
+    let entries = collect_file_entries(repo, workdir, filter)?;
 
     if entries.is_empty() {
         msg::warn("No changes to stage");
-        return Ok(false);
+        return Ok(None);
     }
 
     let tui_theme = TuiTheme::from_graph_theme(theme);
     let result = crate::tui::hunk_selector::run_hunk_selector(entries, tui_theme)?;
 
     match result {
-        None => Ok(false),
+        None => Ok(None),
         Some(selected_files) => {
             apply_selections(workdir, &selected_files)?;
-            Ok(true)
+            Ok(Some(selected_paths(&selected_files)))
         }
     }
 }
 
-/// Collect file entries with git status, staged/unstaged hunks, and proper initial selection.
+/// The paths the picker staged: those with at least one selected hunk.
+///
+/// An entry the picker skipped — a staged change with no hunk to show, such as
+/// a mode-only one — is not here, because nobody could pick it.
+fn selected_paths(files: &[FileEntry]) -> Vec<String> {
+    files
+        .iter()
+        .filter(|file| file.hunks.iter().any(|hunk| hunk.selected))
+        .map(|file| file.path.clone())
+        .collect()
+}
+
+/// The paths a picker is narrowed to, or `None` for every change (no files, or `zz`).
+pub(crate) fn filter_paths(repo: &Repository, files: &[String]) -> Result<Option<Vec<String>>> {
+    if files.is_empty() || files.iter().any(|f| f == "zz") {
+        return Ok(None);
+    }
+    files
+        .iter()
+        .map(|arg| repo::resolve_file_arg(repo, arg))
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
+/// Collect file entries with git status, staged/unstaged hunks, and proper
+/// initial selection. `filter` comes from `filter_paths`; `None` is every change.
 pub(crate) fn collect_file_entries(
     repo: &Repository,
     workdir: &Path,
-    files: &[String],
+    filter: Option<&[String]>,
 ) -> Result<Vec<FileEntry>> {
     let changes = repo::get_working_changes_recurse(repo)?;
-
-    let filter_paths: Option<Vec<String>> = if files.is_empty() || files.iter().any(|f| f == "zz") {
-        None
-    } else {
-        let mut resolved = Vec::new();
-        for arg in files {
-            match repo::resolve_arg(repo, arg, &[TargetKind::File])? {
-                Target::File(path) => resolved.push(path),
-                _ => unreachable!(),
-            }
-        }
-        Some(resolved)
-    };
 
     let mut entries = Vec::new();
     let gitlinks = git::index_gitlinks(workdir)?;
 
     for change in &changes {
-        if let Some(ref filter) = filter_paths
+        if let Some(filter) = filter
             && !filter.contains(&change.path)
         {
             continue;
@@ -506,3 +519,7 @@ fn hunk_sort_key(hunk: &diff::DiffHunk) -> usize {
     let first_line = hunk.text.lines().next().unwrap_or("");
     parse_hunk_start(first_line).unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "staging_test.rs"]
+mod tests;
