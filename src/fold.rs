@@ -826,13 +826,17 @@ fn run_patch_fold_commit_to_commit(
 
     // Phase 1: edit source, remove selected hunks.
     let mut graph = Weave::from_repo(repo)?;
-    graph.edit_commit(source_oid);
+    let _ = graph.edit_commit(source_oid);
     let todo = graph.to_todo();
     git::branch_force_create(workdir, TRACK_BRANCH, target_hash)?;
 
-    if let Err(e) =
-        weave::run_rebase_expecting_edit(workdir, Some(&graph.base_oid.to_string()), &todo)
-    {
+    if let Err(e) = weave::run_rebase_expecting_edit(
+        workdir,
+        Some(&graph.base_oid.to_string()),
+        &todo,
+        source_oid,
+        &[target_hash],
+    ) {
         let _ = git::branch_delete(workdir, TRACK_BRANCH);
         let _ = git::restore_staged_patch(workdir, &saved_staged);
         return Err(e);
@@ -847,7 +851,12 @@ fn run_patch_fold_commit_to_commit(
 
     let new_source_hash = git::rev_parse(workdir, "HEAD")?;
 
-    if let Err(e) = git::continue_rebase_expecting_edit(workdir) {
+    // The source replays during this continue; dropping it as empty would
+    // leave the hash reported below naming someone else's commit.
+    let protect = [new_source_hash.clone()];
+    if let Err(e) =
+        git::continue_rebase_expecting_edit(workdir, git::AfterStop::nothing().protecting(&protect))
+    {
         let _ = git::branch_delete(workdir, TRACK_BRANCH);
         let _ = git::restore_staged_patch(workdir, &saved_staged);
         return Err(e);
@@ -861,7 +870,7 @@ fn run_patch_fold_commit_to_commit(
     // Re-open repo after phase 1 rebase (OIDs changed)
     let repo2 = Repository::open(workdir)?;
     let mut graph2 = Weave::from_repo(&repo2)?;
-    graph2.edit_commit(phase2_target_oid);
+    let _ = graph2.edit_commit(phase2_target_oid);
     let todo2 = graph2.to_todo();
 
     // Phase 1 is already committed, so undoing phase 2 means resetting over a
@@ -869,9 +878,13 @@ fn run_patch_fold_commit_to_commit(
     // `save_and_unstage_staged`, so it puts `saved_staged` back along with it.
     let rollback = || rollback_fold(workdir, &saved_head, Some(&saved_refs), &saved_worktree);
 
-    if let Err(e) =
-        weave::run_rebase_expecting_edit(workdir, Some(&graph2.base_oid.to_string()), &todo2)
-    {
+    if let Err(e) = weave::run_rebase_expecting_edit(
+        workdir,
+        Some(&graph2.base_oid.to_string()),
+        &todo2,
+        phase2_target_oid,
+        &[],
+    ) {
         rollback();
         return Err(e);
     }
@@ -882,7 +895,7 @@ fn run_patch_fold_commit_to_commit(
 
     let new_target_hash = git::rev_parse(workdir, "HEAD")?;
 
-    if let Err(e) = git::continue_rebase_expecting_edit(workdir) {
+    if let Err(e) = git::continue_rebase_expecting_edit(workdir, git::AfterStop::nothing()) {
         rollback();
         return Err(e);
     }
@@ -961,11 +974,15 @@ fn run_patch_fold_commit_to_unstaged(
         let saved_refs = repo::snapshot_branch_refs(repo)?;
 
         let mut graph = Weave::from_repo(repo)?;
-        graph.edit_commit(target_oid);
+        let _ = graph.edit_commit(target_oid);
         let todo = graph.to_todo();
-        if let Err(e) =
-            weave::run_rebase_expecting_edit(workdir, Some(&graph.base_oid.to_string()), &todo)
-        {
+        if let Err(e) = weave::run_rebase_expecting_edit(
+            workdir,
+            Some(&graph.base_oid.to_string()),
+            &todo,
+            target_oid,
+            &[],
+        ) {
             let _ = git::restore_staged_patch(workdir, &saved_staged);
             return Err(e);
         }
@@ -977,7 +994,7 @@ fn run_patch_fold_commit_to_unstaged(
         }
 
         new_hash = git::rev_parse(workdir, "HEAD")?;
-        if let Err(e) = git::continue_rebase_expecting_edit(workdir) {
+        if let Err(e) = git::continue_rebase_expecting_edit(workdir, git::AfterStop::nothing()) {
             return Err(git::rebase_abort_then_cleanup(workdir, e, || {
                 rollback_fold(workdir, &saved_head, Some(&saved_refs), &saved_worktree);
             }));
@@ -1817,10 +1834,16 @@ fn fold_commit_file_to_unstaged(repo: &Repository, commit_hash: &str, path: &str
         let saved_refs = repo::snapshot_branch_refs(repo)?;
 
         let mut graph = Weave::from_repo(repo)?;
-        graph.edit_commit(target_oid);
+        let _ = graph.edit_commit(target_oid);
 
         let todo = graph.to_todo();
-        weave::run_rebase_expecting_edit(workdir, Some(&graph.base_oid.to_string()), &todo)?;
+        weave::run_rebase_expecting_edit(
+            workdir,
+            Some(&graph.base_oid.to_string()),
+            &todo,
+            target_oid,
+            &[],
+        )?;
 
         if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, true) {
             return Err(git::rebase_abort_then_cleanup(workdir, e, || {}));
@@ -1828,7 +1851,7 @@ fn fold_commit_file_to_unstaged(repo: &Repository, commit_hash: &str, path: &str
 
         new_hash = git::rev_parse(workdir, "HEAD")?;
 
-        git::continue_rebase_expecting_edit(workdir)?;
+        git::continue_rebase_expecting_edit(workdir, git::AfterStop::nothing())?;
 
         if !gitlink && let Err(e) = git::apply_patch_to_worktree(workdir, &file_diff) {
             rollback_fold(workdir, &saved_head, Some(&saved_refs), &saved_worktree);
@@ -1910,13 +1933,17 @@ fn fold_commit_file_to_commit(
         // Create temp branch AFTER from_repo to avoid polluting the Weave graph,
         // but before the rebase so git's --update-refs tracks the target's new OID.
         let mut graph = Weave::from_repo(repo)?;
-        graph.edit_commit(source_oid);
+        let _ = graph.edit_commit(source_oid);
         let todo = graph.to_todo();
         git::branch_force_create(workdir, TRACK_BRANCH, target_hash)?;
 
-        if let Err(e) =
-            weave::run_rebase_expecting_edit(workdir, Some(&graph.base_oid.to_string()), &todo)
-        {
+        if let Err(e) = weave::run_rebase_expecting_edit(
+            workdir,
+            Some(&graph.base_oid.to_string()),
+            &todo,
+            source_oid,
+            &[target_hash],
+        ) {
             let _ = git::branch_delete(workdir, TRACK_BRANCH);
             return Err(e);
         }
@@ -1931,7 +1958,7 @@ fn fold_commit_file_to_commit(
         // it will be tracked through phase 2 via a temp branch.
         let phase1_source_hash = git::rev_parse(workdir, "HEAD")?;
 
-        if let Err(e) = git::continue_rebase_expecting_edit(workdir) {
+        if let Err(e) = git::continue_rebase_expecting_edit(workdir, git::AfterStop::nothing()) {
             let _ = git::branch_delete(workdir, TRACK_BRANCH);
             return Err(e);
         }
@@ -1944,7 +1971,7 @@ fn fold_commit_file_to_commit(
         // Re-open repo after phase 1 rebase (OIDs changed)
         let repo2 = Repository::open(workdir)?;
         let mut graph2 = Weave::from_repo(&repo2)?;
-        graph2.edit_commit(phase2_target_oid);
+        let _ = graph2.edit_commit(phase2_target_oid);
 
         // Track source through phase 2 — it will be rewritten when the
         // graph is replayed from base_oid.
@@ -1954,9 +1981,13 @@ fn fold_commit_file_to_commit(
 
         let todo2 = graph2.to_todo();
 
-        if let Err(e) =
-            weave::run_rebase_expecting_edit(workdir, Some(&graph2.base_oid.to_string()), &todo2)
-        {
+        if let Err(e) = weave::run_rebase_expecting_edit(
+            workdir,
+            Some(&graph2.base_oid.to_string()),
+            &todo2,
+            phase2_target_oid,
+            &[],
+        ) {
             rollback();
             return Err(e);
         }
@@ -1967,7 +1998,14 @@ fn fold_commit_file_to_commit(
 
         new_target_hash = git::rev_parse(workdir, "HEAD")?;
 
-        if let Err(e) = git::continue_rebase_expecting_edit(workdir) {
+        // Phase 1's source replays during this continue, tracked by
+        // TRACK_BRANCH: dropping it as empty would slide that ref down onto
+        // the commit below and report it as the moved one.
+        let protect = [phase1_source_hash.clone()];
+        if let Err(e) = git::continue_rebase_expecting_edit(
+            workdir,
+            git::AfterStop::nothing().protecting(&protect),
+        ) {
             rollback();
             return Err(e);
         }
@@ -1982,11 +2020,21 @@ fn fold_commit_file_to_commit(
         let saved_refs = repo::snapshot_branch_refs(repo)?;
 
         let mut graph = Weave::from_repo(repo)?;
-        graph.edit_commit(source_oid);
-        graph.edit_commit(target_oid);
+        let _ = graph.edit_commit(source_oid);
+        // The second `edit` is the one `run_rebase_expecting_edit` does not
+        // check: it verifies the stop it is given, which is the source.
+        if !graph.edit_commit(target_oid) {
+            return Err(weave::not_in_the_weave(target_oid));
+        }
 
         let todo = graph.to_todo();
-        weave::run_rebase_expecting_edit(workdir, Some(&graph.base_oid.to_string()), &todo)?;
+        weave::run_rebase_expecting_edit(
+            workdir,
+            Some(&graph.base_oid.to_string()),
+            &todo,
+            source_oid,
+            &[],
+        )?;
 
         if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, true) {
             return Err(git::rebase_abort_then_cleanup(workdir, e, || {}));
@@ -1994,7 +2042,17 @@ fn fold_commit_file_to_commit(
 
         new_source_hash = git::rev_parse(workdir, "HEAD")?;
 
-        git::continue_rebase_expecting_edit(workdir)?;
+        // The source amend is already committed, so a continue that never
+        // reached the target leaves the file removed and nowhere else: it has
+        // to be rolled back, not just aborted.
+        if let Err(e) = git::continue_rebase_expecting_edit(
+            workdir,
+            git::AfterStop::rewrite(&target_oid.to_string()),
+        ) {
+            return Err(git::rebase_abort_then_cleanup(workdir, e, || {
+                rollback_fold(workdir, &saved_head, Some(&saved_refs), &saved_worktree);
+            }));
+        }
 
         if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, false) {
             return Err(git::rebase_abort_then_cleanup(workdir, e, || {
@@ -2004,7 +2062,11 @@ fn fold_commit_file_to_commit(
 
         new_target_hash = git::rev_parse(workdir, "HEAD")?;
 
-        git::continue_rebase_expecting_edit(workdir)?;
+        if let Err(e) = git::continue_rebase_expecting_edit(workdir, git::AfterStop::nothing()) {
+            return Err(git::rebase_abort_then_cleanup(workdir, e, || {
+                rollback_fold(workdir, &saved_head, Some(&saved_refs), &saved_worktree);
+            }));
+        }
     }
 
     msg::success(&format!(

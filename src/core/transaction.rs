@@ -318,7 +318,11 @@ pub fn continue_cmd(workdir: &Path, git_dir: &Path) -> Result<()> {
     // once there is something to compare it against.
     let auto_merge_before = git::auto_merge_id(workdir);
     if git::rebase_is_in_progress(git_dir) {
-        match git::continue_rebase(workdir)? {
+        // A stop on a commit the new history already contains is not a conflict
+        // to resolve (`skip_empty_stops` establishes that before skipping
+        // anything). Nothing is protected: every resumable owner has already
+        // made its rewrite by the time it can pause.
+        match git::skip_empty_stops(workdir, git_dir, &[], git::continue_rebase(workdir)?)? {
             git::RebaseOutcome::Paused => {
                 warn_paused_at_edit(Some(&state.command));
                 return Ok(());
@@ -418,6 +422,9 @@ fn continue_without_state(workdir: &Path, git_dir: &Path) -> Result<()> {
     let before = git::auto_merge_id(workdir);
     let before = before.as_deref();
     if git::rebase_is_in_progress(git_dir) {
+        // No `skip_empty_stops` here: a rebase with no loom state behind it may
+        // well be the user's own, and `rebase -i` halts on an empty replay on
+        // purpose, to let them decide.
         match git::continue_rebase(workdir)? {
             git::RebaseOutcome::Paused => warn_paused_at_edit(None),
             git::RebaseOutcome::Stopped => {

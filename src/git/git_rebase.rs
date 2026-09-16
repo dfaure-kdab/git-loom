@@ -83,6 +83,192 @@ pub fn rebase_onto(workdir: &Path, newbase: &str, upstream: &str) -> Result<()> 
     )
 }
 
+/// What a rebase replay preserves: the author and the message, never the hash.
+///
+/// Not unique — a repeated `wip` by one author in the same second collides —
+/// so it backstops [`skip_empty_stops`] rather than carrying the guarantee.
+fn replay_identity(workdir: &Path, rev: &str) -> Result<String> {
+    super::run_git_stdout(
+        workdir,
+        &["show", "-s", "--format=%an%x00%ae%x00%at%x00%B", rev],
+    )
+}
+
+/// Verify a paused rebase stopped on the replay of `expect_stop`, aborting the
+/// rebase if it did not (Spec 004).
+///
+/// A backstop behind [`skip_empty_stops`], for a stop landing elsewhere for any
+/// other reason, before the caller amends or resets whatever HEAD happens to be.
+pub fn verify_paused_at(workdir: &Path, expect_stop: &str) -> Result<()> {
+    match stopped_on_the_replay(workdir, expect_stop) {
+        Ok(true) => Ok(()),
+        // A git that cannot answer is no more a license to rewrite than a
+        // mismatch is, so both exits abort the rebase they leave running.
+        Ok(false) => {
+            // Built first: the abort below moves HEAD back, and this names the
+            // commit the rebase stopped on.
+            let cause = mismatch_error(workdir, expect_stop);
+            Err(rebase_abort_then_cleanup(workdir, cause, || {}))
+        }
+        Err(e) => Err(rebase_abort_then_cleanup(workdir, e, || {})),
+    }
+}
+
+/// Whether the paused rebase stopped on `expect_stop`, by the name git itself
+/// recorded for the stop.
+///
+/// `stopped-sha` holds the original commit, which is exactly what `expect_stop`
+/// names, so it tells two commits apart where identity cannot: a commit already
+/// cherry-picked upstream shares its author, date and message with its
+/// duplicate. Identity remains the fallback for a pause git recorded no
+/// `stopped-sha` for.
+fn stopped_on_the_replay(workdir: &Path, expect_stop: &str) -> Result<bool> {
+    if let Some(sha) = stopped_sha(&super::absolute_git_dir(workdir)?) {
+        return Ok(shas_match(&sha, expect_stop));
+    }
+    Ok(replay_identity(workdir, "HEAD")? == replay_identity(workdir, expect_stop)?)
+}
+
+/// Names the commit the rebase stopped on by subject: its hash is a replay that
+/// the abort is about to make unreachable, so it would tell the user nothing.
+fn mismatch_error(workdir: &Path, expect_stop: &str) -> anyhow::Error {
+    let subject = super::run_git_stdout(workdir, &["show", "-s", "--format=%s", "HEAD"])
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let stopped_on = match subject.as_str() {
+        "" => "another commit".to_string(),
+        subject => format!("`{subject}`"),
+    };
+    anyhow::anyhow!(
+        "Commit `{}` was not replayed — the rebase stopped on {stopped_on} instead\n\
+         Nothing was rewritten",
+        super::short_hash(expect_stop)
+    )
+}
+
+/// Whether the worktree or index carries changes that `git rebase --skip`, a
+/// hard reset, would throw away. Untracked files survive a skip.
+///
+/// `--ignore-submodules=dirty` because a submodule's own worktree is not the
+/// superproject's to lose: autostash never stashes it, so counting it would
+/// leave this permanently true and deadlock every empty stop. A gitlink the
+/// index does move is still reported — that one a reset would discard.
+///
+/// A git that cannot answer counts as changed: not knowing is never a license
+/// to reset.
+fn has_local_changes(workdir: &Path) -> bool {
+    super::run_git_stdout(
+        workdir,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+            "--ignore-submodules=dirty",
+        ],
+    )
+    .map_or(true, |out| !out.trim().is_empty())
+}
+
+/// Whether two commit SHAs name the same commit, either one abbreviated.
+///
+/// The abbreviated side is always a todo's own hash, which `Weave::to_todo`
+/// and `build_and_run_linear_edit` both take from `short_id()` — the shortest
+/// prefix unambiguous in the repository — so a shared prefix is the same
+/// commit. (`git::short_hash`'s fixed 7 is for display and never reaches here.)
+/// Sliced as bytes, which cannot land mid-character.
+fn shas_match(a: &str, b: &str) -> bool {
+    let shortest = a.len().min(b.len());
+    shortest > 0 && a.as_bytes()[..shortest] == b.as_bytes()[..shortest]
+}
+
+/// The commit `--empty=stop` stopped on, as git recorded it.
+fn stopped_sha(git_dir: &Path) -> Option<String> {
+    let sha = std::fs::read_to_string(git_dir.join("rebase-merge").join("stopped-sha")).ok()?;
+    let sha = sha.trim().to_string();
+    (!sha.is_empty()).then_some(sha)
+}
+
+/// Whether replaying `sha` on top of HEAD would produce nothing.
+///
+/// Asks the same question the sequencer did — merge the commit's own diff into
+/// HEAD and see whether the tree moves — because the answer decides whether
+/// `git rebase --skip`, a hard reset, runs. Comparing the files the commit
+/// touches is not the same question: upstream may have taken the change plus
+/// more of the same file.
+///
+/// Anything git cannot answer — a root commit with no `^`, a conflicting
+/// merge, a git that failed to run — says no.
+fn replays_empty(workdir: &Path, sha: &str) -> bool {
+    let Ok(head_tree) = super::run_git_stdout(workdir, &["rev-parse", "HEAD^{tree}"]) else {
+        return false;
+    };
+    let Ok(merged) = super::run_git_stdout(
+        workdir,
+        &[
+            "merge-tree",
+            "--write-tree",
+            "--merge-base",
+            &format!("{sha}^"),
+            "HEAD",
+            sha,
+        ],
+    ) else {
+        return false;
+    };
+
+    merged.lines().next().map(str::trim) == Some(head_tree.trim())
+}
+
+/// Carry a rebase past every commit whose changes the new history already has,
+/// refusing when one of them is in `protected` (Spec 004).
+///
+/// A skip is a hard reset, so it runs only where the repository itself says the
+/// commit would add nothing, and never over a tree carrying local changes. A
+/// stop this cannot account for — a conflict, a stale `index.lock`, a
+/// resolution that came out empty — is handed back for the caller to report.
+pub fn skip_empty_stops(
+    workdir: &Path,
+    git_dir: &Path,
+    protected: &[String],
+    mut outcome: RebaseOutcome,
+) -> Result<RebaseOutcome> {
+    let mut skipped_already: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    while outcome == RebaseOutcome::Stopped && !has_unmerged_paths(workdir) {
+        let Some(sha) = stopped_sha(git_dir) else {
+            return Ok(outcome);
+        };
+        if has_local_changes(workdir) || !replays_empty(workdir, &sha) {
+            return Ok(outcome);
+        }
+        // A `--skip` that leaves the rebase where it was would loop here.
+        if !skipped_already.insert(sha.clone()) {
+            return Ok(outcome);
+        }
+
+        if protected.iter().any(|target| shas_match(target, &sha)) {
+            let short = super::short_hash(&sha);
+            return Err(rebase_abort_then_cleanup(
+                workdir,
+                anyhow::anyhow!(
+                    "Commit `{short}` replays empty — the commits below it already have its changes\n\
+                     Nothing was rewritten. `loom drop {short} -y` removes it for good"
+                ),
+                || {},
+            ));
+        }
+
+        let short = super::short_hash(&sha).to_string();
+        match rebase_outcome(git_dir, super::run_git(workdir, &["rebase", "--skip"])) {
+            Ok(next) => outcome = next,
+            Err(e) => return Err(rebase_abort_then_cleanup(workdir, e, || {})),
+        }
+        crate::core::msg::warn(&format!("Dropped `{short}` — it replays empty here"));
+    }
+    Ok(outcome)
+}
+
 /// Abort an in-progress rebase.
 pub fn rebase_abort(workdir: &Path) -> Result<()> {
     super::run_git(workdir, &["rebase", "--abort"])
@@ -208,11 +394,68 @@ pub fn auto_merge_id(workdir: &Path) -> Option<String> {
 /// success. Only for callers that put those steps in the todo themselves
 /// (`fold`'s edit-and-continue and multi-phase paths, `split`) — a caller whose
 /// todo has none would take a rebase left mid-flight for a finished one.
-pub fn continue_rebase_expecting_edit(workdir: &Path) -> Result<()> {
-    match continue_rebase(workdir)? {
-        RebaseOutcome::Completed | RebaseOutcome::Paused => Ok(()),
+///
+/// `after` says whether this continue has a rewrite of its own to protect.
+pub fn continue_rebase_expecting_edit(workdir: &Path, after: AfterStop<'_>) -> Result<()> {
+    let git_dir = super::absolute_git_dir(workdir)?;
+    let mut protected = after.protect.to_vec();
+    protected.extend(after.expect.map(str::to_string));
+    let outcome = skip_empty_stops(workdir, &git_dir, &protected, continue_rebase(workdir)?)?;
+
+    let Some(expect_stop) = after.expect else {
+        return match outcome {
+            RebaseOutcome::Completed | RebaseOutcome::Paused => Ok(()),
+            RebaseOutcome::Stopped => Err(abort_after_failure(workdir)),
+        };
+    };
+
+    match outcome {
+        RebaseOutcome::Paused => verify_paused_at(workdir, expect_stop),
+        RebaseOutcome::Completed => Err(finished_without_stopping(expect_stop)),
         RebaseOutcome::Stopped => Err(abort_after_failure(workdir)),
     }
+}
+
+/// What a caller does once a continued rebase reaches its next `edit` step.
+#[derive(Debug, Default)]
+pub struct AfterStop<'a> {
+    expect: Option<&'a str>,
+    protect: &'a [String],
+}
+
+impl<'a> AfterStop<'a> {
+    /// Nothing of the caller's own rides on this continue.
+    pub fn nothing() -> Self {
+        Self::default()
+    }
+
+    /// The caller rewrites the commit this continue stops at, so the stop is
+    /// verified against it (see [`verify_paused_at`]).
+    pub fn rewrite(expect_stop: &'a str) -> Self {
+        Self {
+            expect: Some(expect_stop),
+            protect: &[],
+        }
+    }
+
+    /// Commits that must survive the replay this continue drives — one a later
+    /// phase still has to find, for instance.
+    pub fn protecting(self, protect: &'a [String]) -> Self {
+        Self { protect, ..self }
+    }
+}
+
+/// The rebase ran to the end although its todo marked a commit for editing.
+///
+/// Defensive: git honors an `edit` line even for a commit it drops as empty, so
+/// nothing is known to reach this. There is no rebase left to abort either way,
+/// hence the report of what the repository now holds.
+pub fn finished_without_stopping(expect_stop: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "The rebase finished without stopping at `{}` — history was rewritten\n\
+         `git reflog` has the previous tips",
+        super::short_hash(expect_stop)
+    )
 }
 
 #[cfg(test)]

@@ -34,6 +34,20 @@ Changes the commit message using git's native interactive rebase. All descendant
 
 **What stays the same:** commit content (files, diffs), topology, and branches outside the ancestry chain.
 
+#### Commits that are already upstream
+
+Rewording replays the commit onto the current upstream, which may have moved since you
+wrote it. If everything the commit changes is already there, it has nothing left to
+apply and loom refuses rather than rewrite something else:
+
+```console
+$ loom reword ab
+# ✗ Commit 4783c1b replays empty — the commits below it already have its changes
+#   › Nothing was rewritten. `loom drop 4783c1b -y` removes it for good
+```
+
+A redundant commit that is *not* the one you are rewording is dropped, and loom says so.
+
 #### Conflicts
 
 Every commit above the target gets a new hash, so any merge commit in the way has to be rebuilt instead of reused. A merge you originally resolved by hand will conflict again — a merge commit records the tree it produced, never the resolution that produced it. (With `rerere` enabled, git replays your recorded resolution, so the file has no conflict markers — the reword still pauses, and you stage the replayed resolution before `loom continue`.)

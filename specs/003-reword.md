@@ -40,7 +40,7 @@ On replay conflict, retain the amended message and pause with exactly this guida
   `loom abort`      to cancel and restore original state
 ```
 
-`loom continue` completes the reword. `loom abort` restores the original message, HEAD, and all branch refs (Spec 014). Outside a paused conflict, the operation is atomic and MUST NOT leave an incidental rebase state.
+`loom continue` completes the reword. `loom abort` restores the original message, HEAD, and all branch refs (Spec 014). Outside a paused conflict, the operation is atomic and MUST NOT leave an incidental rebase state. A target whose replay is dropped MUST refuse and restore, naming the commit (Spec 004).
 
 ## Branch target
 

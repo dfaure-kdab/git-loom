@@ -202,7 +202,7 @@ fn perform_non_head_with(
     };
     // Continue the rebase: later commits replay on top of the split commits, so
     // hash1/hash2 stay valid. Aborts on conflict — split saves no LoomState.
-    git::continue_rebase_expecting_edit(workdir)?;
+    git::continue_rebase_expecting_edit(workdir, git::AfterStop::nothing())?;
     Ok(result)
 }
 

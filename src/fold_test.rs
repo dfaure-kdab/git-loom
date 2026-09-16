@@ -3302,3 +3302,37 @@ fn fold_commits_above_a_branch_tip_advance_the_branch_in_order() {
         "HEAD is the merge again"
     );
 }
+
+#[test]
+fn fold_file_out_of_a_commit_refuses_when_the_replay_is_dropped() {
+    // fold owns most of the edit stops, and this path amends whatever the
+    // rebase left at HEAD — the base, once the target is dropped.
+    let (t, target) = crate::core::test_helpers::repo_with_dropped_replay();
+    let head_before = t.head_oid();
+    let alpha_before = t.get_branch_target("alpha");
+
+    let err = super::fold_commit_file_to_unstaged(&t.repo, &target.to_string(), "one.txt")
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("replays empty"), "{err}");
+    assert_eq!(t.head_oid(), head_before, "{err}");
+    assert_eq!(t.get_branch_target("alpha"), alpha_before, "{err}");
+    assert!(!crate::git::rebase_is_in_progress(t.repo.path()), "{err}");
+}
+
+#[test]
+fn fold_between_commits_walks_past_a_redundant_one() {
+    // Source older than target: one rebase with two `edit` stops, and the
+    // commit that replays empty sits between them, on the continue.
+    let (t, older, newer) = crate::core::test_helpers::repo_with_a_redundant_commit_between();
+
+    super::fold_commit_file_to_commit(&t.repo, &older.to_string(), "moved.txt", &newer.to_string())
+        .unwrap();
+
+    assert!(!crate::git::rebase_is_in_progress(t.repo.path()));
+    assert!(!t.commit_messages().contains(&"branch change".to_string()));
+    let newer_oid = t.get_branch_target("alpha");
+    assert!(t.commit_has_file(newer_oid, "moved.txt"));
+    assert!(t.commit_has_file(newer_oid, "newer.txt"));
+}

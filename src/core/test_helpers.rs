@@ -793,6 +793,128 @@ impl Default for TestRepoBuilder {
     }
 }
 
+/// A repo where branch `alpha`'s only commit replays empty: the same content
+/// reached the upstream through unrelated commits, so a weave rebase drops it
+/// while git still stops at its `edit` line. Returns the repo and that commit.
+///
+/// The upstream gets there in two steps on purpose: no patch-id matches the
+/// branch's, so only the emptiness at apply time reveals it.
+pub fn repo_with_dropped_replay() -> (TestRepo, git2::Oid) {
+    let (t, target) = branch_forked_below_upstream();
+
+    publish_upstream_with_the_branch_content(&t);
+    (t, target)
+}
+
+/// The same shape plus a commit on `alpha` that is still needed: rewriting that
+/// one has to get past the redundant commit below it rather than refuse.
+/// Returns the repo and the commit worth keeping.
+pub fn repo_with_a_redundant_commit_below() -> (TestRepo, git2::Oid) {
+    let (t, _redundant) = branch_forked_below_upstream();
+    let keeper = t.commit_multi(&[("three.txt", "three\n")], "still needed");
+
+    publish_upstream_with_the_branch_content(&t);
+    (t, keeper)
+}
+
+/// A branch whose middle commit replays empty, between two that do not: the
+/// shape a two-stop fold has to walk through. Returns the repo, the older
+/// commit and the newer one.
+pub fn repo_with_a_redundant_commit_between() -> (TestRepo, git2::Oid, git2::Oid) {
+    let t = TestRepo::new_with_remote();
+    let base = t.find_remote_branch_target("origin/main").to_string();
+
+    t.create_branch_at("alpha", &base);
+    t.switch_branch("alpha");
+    let older = t.commit_multi(
+        &[("moved.txt", "moved\n"), ("kept.txt", "kept\n")],
+        "older change",
+    );
+    t.commit_multi(
+        &[("one.txt", "final one\n"), ("two.txt", "final two\n")],
+        "branch change",
+    );
+    let newer = t.commit_multi(&[("newer.txt", "newer\n")], "newer change");
+    t.create_branch_at("upstream-work", &base);
+
+    publish_upstream_with_the_branch_content(&t);
+    (t, older, newer)
+}
+
+/// The redundant commit the other way round: above the one being rewritten, so
+/// the rebase only meets it after the caller has done its work.
+pub fn repo_with_a_redundant_commit_above() -> (TestRepo, git2::Oid) {
+    let t = TestRepo::new_with_remote();
+    let base = t.find_remote_branch_target("origin/main").to_string();
+
+    t.create_branch_at("alpha", &base);
+    t.switch_branch("alpha");
+    let keeper = t.commit_multi(&[("three.txt", "three\n")], "still needed");
+    t.commit_multi(
+        &[("one.txt", "final one\n"), ("two.txt", "final two\n")],
+        "branch change",
+    );
+    t.create_branch_at("upstream-work", &base);
+
+    publish_upstream_with_the_branch_content(&t);
+    (t, keeper)
+}
+
+/// Give the upstream the branch's final content through unrelated commits, then
+/// weave `alpha` on top of it.
+fn publish_upstream_with_the_branch_content(t: &TestRepo) {
+    t.switch_branch("upstream-work");
+    t.commit_multi(&[("one.txt", "first try\n")], "upstream step one");
+    t.commit_multi(
+        &[("one.txt", "final one\n"), ("two.txt", "final two\n")],
+        "upstream step two",
+    );
+
+    weave_over_upstream(t);
+}
+
+/// The same shape, with the upstream carrying a literal cherry-pick of the
+/// branch commit: author and message match, so the identity backstop alone
+/// would take the base for the target's replay.
+pub fn repo_with_cherry_picked_replay() -> (TestRepo, git2::Oid) {
+    let (t, target) = branch_forked_below_upstream();
+
+    t.switch_branch("upstream-work");
+    // Somewhere else to land on: cherry-picking onto the target's own parent
+    // would rebuild the very same commit.
+    t.commit_multi(&[("unrelated.txt", "unrelated\n")], "upstream work");
+    crate::git::run_git(t.workdir().as_path(), &["cherry-pick", &target.to_string()]).unwrap();
+
+    weave_over_upstream(&t);
+    (t, target)
+}
+
+/// Branch `alpha` with one two-file commit, and an empty `upstream-work`, both
+/// forked at the upstream tip the caller then moves past.
+fn branch_forked_below_upstream() -> (TestRepo, git2::Oid) {
+    let t = TestRepo::new_with_remote();
+    let base = t.find_remote_branch_target("origin/main").to_string();
+
+    t.create_branch_at("alpha", &base);
+    t.switch_branch("alpha");
+    let target = t.commit_multi(
+        &[("one.txt", "final one\n"), ("two.txt", "final two\n")],
+        "branch change",
+    );
+    t.create_branch_at("upstream-work", &base);
+
+    (t, target)
+}
+
+/// Publish `upstream-work` as the new upstream and weave `alpha` on top of it,
+/// leaving `alpha` forked below the base it will be replayed onto.
+fn weave_over_upstream(t: &TestRepo) {
+    t.push_branch_to_remote_main("upstream-work");
+    t.switch_branch("integration");
+    t.reset_hard(t.find_remote_branch_target("origin/main"));
+    t.merge_no_ff("alpha");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
