@@ -126,3 +126,34 @@ fn swap_abort_preserves_working_state() {
     );
     assert_eq!(test_repo.read_file("new-file.txt"), "new-content");
 }
+
+#[test]
+fn swap_refuses_when_a_swapped_commit_replays_empty() {
+    // Both commits are named in the success message, so neither may vanish.
+    let (t, redundant, keeper) = crate::core::test_helpers::repo_with_a_redundant_commit_below();
+    let head_before = t.head_oid();
+    let alpha_before = t.get_branch_target("alpha");
+    t.write_file("three.txt", "three\nstaged edit\n");
+    t.stage_files(&["three.txt"]);
+    let staged_before = crate::git::diff_cached(&t.workdir()).unwrap();
+
+    let err = super::swap_two_commits(&t.repo, redundant.to_string(), keeper.to_string())
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("replays empty"), "{err}");
+    assert_eq!(t.head_oid(), head_before, "{err}");
+    assert_eq!(t.get_branch_target("alpha"), alpha_before, "{err}");
+    assert!(!crate::git::rebase_is_in_progress(t.repo.path()), "{err}");
+    assert!(
+        !t.repo.path().join("loom").join("state.json").exists(),
+        "{err}"
+    );
+    // `git rebase --abort` replays the autostash unstaged; `saved_staged_patch`
+    // is what puts the index back.
+    assert_eq!(
+        crate::git::diff_cached(&t.workdir()).unwrap(),
+        staged_before,
+        "{err}"
+    );
+}

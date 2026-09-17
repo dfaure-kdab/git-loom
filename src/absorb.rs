@@ -264,6 +264,17 @@ fn apply_plan(repo: &Repository, workdir: &Path, git_dir: &Path, plan: AbsorbPla
         graph.fixup_commit(*fixup_oid, *target_oid)?;
     }
 
+    // A target dropped as empty takes its `pick` with it and leaves the
+    // `fixup` below it to land on whatever git picked before — an upstream
+    // commit, in the worst case — while the count below still claims success.
+    // One entry per target, not per fixup: several can land on the same commit.
+    let protect: Vec<String> = fixup_pairs
+        .iter()
+        .map(|(_, target)| target.to_string())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
     let ctx = AbsorbContext {
         skipped_patch: skipped_patch.clone(),
         num_hunks: plan.num_hunks,
@@ -281,11 +292,15 @@ fn apply_plan(repo: &Repository, workdir: &Path, git_dir: &Path, plan: AbsorbPla
             ..Default::default()
         },
         context: serde_json::to_value(&ctx)?,
+        protect,
     };
     transaction::save(git_dir, &state)?;
 
     let todo = graph.to_todo();
-    match weave::run_rebase(workdir, Some(&graph.base_oid.to_string()), &todo)? {
+    let base = graph.base_oid.to_string();
+    let outcome = weave::run_rebase_protecting(workdir, Some(&base), &todo, &state.protect)
+        .map_err(|e| transaction::roll_back_failed_rebase(workdir, git_dir, &state, e))?;
+    match outcome {
         RebaseOutcome::Completed => {
             transaction::delete(git_dir)?;
             post_absorb(

@@ -171,7 +171,7 @@ Binary/deleted files cannot supply patch hunks. If no text selection is possible
 
 A submodule is one whole entry in the picker, taken or left entire. It travels as the commit's own whole-file diff, applied with `--cached`: a picked hunk carries no file mode and would land the entry as a plain blob. `split -p` does the same (Spec 013).
 
-This move uses two edit-and-continue phases: first remove hunks from source, then add them to target. Target's new OID is unknown until phase one, so `_loom-track` carries its pre-phase-one OID into phase two.
+This move uses two edit-and-continue phases: first remove hunks from source, then add them to target. Target's new OID is unknown until phase one, so `_loom-track` carries its pre-phase-one OID into phase two; phase two replays the source in turn, so `_loom-track` then follows the source, whose post-phase-one OID is stale by the end.
 
 ### Commit hunks to working tree
 

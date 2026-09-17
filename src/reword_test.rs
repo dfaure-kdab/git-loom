@@ -535,7 +535,7 @@ fn reword_gets_past_a_redundant_commit_below_the_target() {
     // Only the commit being rewritten has to survive the replay: one below it
     // whose changes are already upstream is dropped, as it always was, and the
     // reword goes through.
-    let (t, keeper) = crate::core::test_helpers::repo_with_a_redundant_commit_below();
+    let (t, _redundant, keeper) = crate::core::test_helpers::repo_with_a_redundant_commit_below();
 
     super::reword_commit(&t.repo, &keeper.to_string(), Some("Reworded".to_string())).unwrap();
 

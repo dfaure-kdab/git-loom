@@ -73,6 +73,22 @@ git loom absorb src/auth.rs src/utils.rs
 # Absorbed 2 hunk(s) from 2 file(s) into 2 commit(s)
 ```
 
+## Commits that are already upstream
+
+If a target commit's own changes are all upstream already, it has nothing left
+to apply. Loom refuses rather than let git drop it and squash the hunks into
+whatever commit sits below:
+
+```console
+$ loom absorb
+# ✗ Commit `4783c1b` replays empty — the commits below it already have its changes
+#   › Nothing was rewritten. `loom drop 4783c1b -y` removes it for good
+```
+
+The hint is generic, and dropping the target is rarely what you want here: it is
+the commit your changes were headed for. Run `loom update` first, or absorb into
+a different commit. Your changes stay in the working tree either way.
+
 ## Conflicts
 
 If the rebase that folds the fixup commits hits a conflict, the operation is

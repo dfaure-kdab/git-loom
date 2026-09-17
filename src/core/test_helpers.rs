@@ -808,13 +808,13 @@ pub fn repo_with_dropped_replay() -> (TestRepo, git2::Oid) {
 
 /// The same shape plus a commit on `alpha` that is still needed: rewriting that
 /// one has to get past the redundant commit below it rather than refuse.
-/// Returns the repo and the commit worth keeping.
-pub fn repo_with_a_redundant_commit_below() -> (TestRepo, git2::Oid) {
-    let (t, _redundant) = branch_forked_below_upstream();
+/// Returns the repo, the redundant commit and the one worth keeping.
+pub fn repo_with_a_redundant_commit_below() -> (TestRepo, git2::Oid, git2::Oid) {
+    let (t, redundant) = branch_forked_below_upstream();
     let keeper = t.commit_multi(&[("three.txt", "three\n")], "still needed");
 
     publish_upstream_with_the_branch_content(&t);
-    (t, keeper)
+    (t, redundant, keeper)
 }
 
 /// A branch whose middle commit replays empty, between two that do not: the

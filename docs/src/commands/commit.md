@@ -73,6 +73,19 @@ When the integration branch has diverged (woven branches exist):
 - If `-b` is omitted: interactive picker with all woven branches + option to create a new one
 - If `-i` is given: no branch resolution at all — the commit lands on the integration tip
 
+### Changes the branch already has
+
+Step 5 replays the new commit onto the branch's base, which is the current
+upstream. If everything the commit changes is already there, it has nothing left
+to apply, so loom undoes the commit rather than report one it did not create.
+Your changes come back, and there is no commit left to drop:
+
+```console
+$ loom commit -b feature-auth -m "Restore the check"
+# ✗ Commit `4783c1b` replays empty — the commits below it already have its changes
+#   › The `loom commit` was rolled back, so there is nothing left to drop
+```
+
 ### New Branch Creation
 
 When the target branch doesn't exist, *git-loom* validates the name, creates the branch at the merge-base, and weaves it into the integration topology — all automatically.

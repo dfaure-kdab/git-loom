@@ -2465,6 +2465,7 @@ fn fold_rolls_back_when_the_rebase_refuses_to_start() {
     test_repo.write_file("a1.txt", "the change to fold\n");
     test_repo.write_file("other.txt", "staged by the user\n");
     test_repo.stage_files(&["other.txt"]);
+    let staged_before = crate::git::diff_cached(&workdir).unwrap();
 
     let result = super::fold_files_into_commit(
         &test_repo.repo,
@@ -2493,6 +2494,11 @@ fn fold_rolls_back_when_the_rebase_refuses_to_start() {
         staged,
         vec!["other.txt".to_string()],
         "only the user's own staged file may be left staged"
+    );
+    assert_eq!(
+        crate::git::diff_cached(&workdir).unwrap(),
+        staged_before,
+        "a refusal before the rebase must not touch the index at all"
     );
     assert!(
         test_repo
@@ -3335,4 +3341,243 @@ fn fold_between_commits_walks_past_a_redundant_one() {
     let newer_oid = t.get_branch_target("alpha");
     assert!(t.commit_has_file(newer_oid, "moved.txt"));
     assert!(t.commit_has_file(newer_oid, "newer.txt"));
+}
+
+#[test]
+fn fold_commit_relative_refuses_when_the_moved_commit_replays_empty() {
+    // `_loom-track` follows the moved commit; dropping it would slide that ref
+    // onto the commit below and report it as the one that moved.
+    let (t, redundant, keeper) = crate::core::test_helpers::repo_with_a_redundant_commit_below();
+    let head_before = t.head_oid();
+    let alpha_before = t.get_branch_target("alpha");
+    let staged_before = stage_a_tracked_edit(&t);
+
+    let err = super::fold_commit_relative(
+        &t.repo,
+        &redundant.to_string(),
+        &keeper.to_string(),
+        Position::Above,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("replays empty"), "{err}");
+    assert_eq!(t.head_oid(), head_before, "{err}");
+    assert_eq!(t.get_branch_target("alpha"), alpha_before, "{err}");
+    assert!(!t.branch_exists("_loom-track"), "{err}");
+    assert!(!crate::git::rebase_is_in_progress(t.repo.path()), "{err}");
+    assert!(
+        !t.repo.path().join("loom").join("state.json").exists(),
+        "{err}"
+    );
+    assert_eq!(
+        crate::git::diff_cached(&t.workdir()).unwrap(),
+        staged_before,
+        "{err}"
+    );
+}
+
+#[test]
+fn fold_commit_into_commit_refuses_when_the_target_replays_empty() {
+    // Here `_loom-track` follows the target, and the fixup would land on
+    // whatever commit git left below it.
+    let (t, redundant, keeper) = crate::core::test_helpers::repo_with_a_redundant_commit_below();
+    let head_before = t.head_oid();
+    let alpha_before = t.get_branch_target("alpha");
+    let staged_before = stage_a_tracked_edit(&t);
+
+    let err = super::fold_commit_into_commit(&t.repo, &keeper.to_string(), &redundant.to_string())
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("replays empty"), "{err}");
+    assert_eq!(t.head_oid(), head_before, "{err}");
+    assert_eq!(t.get_branch_target("alpha"), alpha_before, "{err}");
+    assert!(!t.branch_exists("_loom-track"), "{err}");
+    assert!(!crate::git::rebase_is_in_progress(t.repo.path()), "{err}");
+    assert!(
+        !t.repo.path().join("loom").join("state.json").exists(),
+        "{err}"
+    );
+    assert_eq!(
+        crate::git::diff_cached(&t.workdir()).unwrap(),
+        staged_before,
+        "{err}"
+    );
+}
+
+#[test]
+fn fold_files_into_commit_refuses_when_the_target_replays_empty() {
+    // The `fixup!` commit this path makes first has to come back too.
+    let (t, redundant, _keeper) = crate::core::test_helpers::repo_with_a_redundant_commit_below();
+    let head_before = t.head_oid();
+    t.write_file("three.txt", "folded\n");
+
+    let err = super::fold_files_into_commit(
+        &t.repo,
+        &["three.txt".to_string()],
+        &redundant.to_string(),
+        false,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("replays empty"), "{err}");
+    assert_eq!(t.head_oid(), head_before, "{err}");
+    assert!(!t.branch_exists("_loom-track"), "{err}");
+    assert_eq!(t.read_file("three.txt"), "folded\n", "{err}");
+    assert!(!crate::git::rebase_is_in_progress(t.repo.path()), "{err}");
+    assert!(
+        !t.repo.path().join("loom").join("state.json").exists(),
+        "{err}"
+    );
+}
+
+#[test]
+fn fold_commit_to_branch_refuses_when_the_moved_commit_replays_empty() {
+    // The branch ref is what names the moved commit afterwards, so a drop
+    // would report the tip it was appended to.
+    let (t, redundant, _keeper) = crate::core::test_helpers::repo_with_a_redundant_commit_below();
+    t.create_branch_at(
+        "beta",
+        &t.find_remote_branch_target("origin/main").to_string(),
+    );
+    let head_before = t.head_oid();
+    let beta_before = t.get_branch_target("beta");
+
+    let err = super::fold_commit_to_branch(&t.repo, &redundant.to_string(), "beta")
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("replays empty"), "{err}");
+    assert_eq!(t.head_oid(), head_before, "{err}");
+    assert_eq!(t.get_branch_target("beta"), beta_before, "{err}");
+    assert!(!crate::git::rebase_is_in_progress(t.repo.path()), "{err}");
+    assert!(
+        !t.repo.path().join("loom").join("state.json").exists(),
+        "{err}"
+    );
+}
+
+#[test]
+fn fold_several_commits_to_a_branch_refuses_when_one_replays_empty() {
+    // The multi-commit move reports how many commits it moved, so one dropped
+    // as empty is a commit the user is told moved and cannot find.
+    let (t, redundant, keeper) = crate::core::test_helpers::repo_with_a_redundant_commit_below();
+    t.create_branch_at(
+        "beta",
+        &t.find_remote_branch_target("origin/main").to_string(),
+    );
+    let head_before = t.head_oid();
+
+    let err = super::move_commits_and_report(
+        &t.workdir(),
+        &t.repo,
+        &[redundant.to_string(), keeper.to_string()],
+        "beta",
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("replays empty"), "{err}");
+    assert_eq!(t.head_oid(), head_before, "{err}");
+    assert!(!crate::git::rebase_is_in_progress(t.repo.path()), "{err}");
+}
+
+/// Phase 2 rewrites the target underneath the source, so the source hash
+/// phase 1 produced is stale by the time the move is reported.
+#[test]
+fn fold_patch_between_commits_names_the_source_that_survives_phase_two() {
+    let t = TestRepo::new_with_remote();
+    let body = "1\n2\n3\n4\n5\n6\n7\n8\n";
+    t.commit_multi(&[("f.txt", body)], "Base");
+    let target = t.commit_multi(&[("t.txt", "target\n")], "Target");
+    let moved = body.replace("2\n", "TWO\n");
+    let source = t.commit_multi(&[("f.txt", &moved), ("g.txt", "g\n")], "Source");
+
+    let workdir = t.workdir();
+    let mut selections =
+        crate::core::staging::collect_commit_hunks(&workdir, &source.to_string(), &[]).unwrap();
+    for file in &mut selections {
+        if file.path == "f.txt" {
+            for hunk in &mut file.hunks {
+                hunk.selected = true;
+            }
+        }
+    }
+
+    let (new_source, new_target) = super::fold_selected_hunks_to_commit(
+        &t.repo,
+        &workdir,
+        &source.to_string(),
+        &target.to_string(),
+        &selections,
+    )
+    .unwrap();
+
+    assert_eq!(new_source, t.head_oid().to_string());
+    assert_eq!(new_target, t.get_oid(1).to_string());
+    assert_eq!(t.commit_file_paths(t.head_oid()), ["g.txt"]);
+    assert!(t.commit_has_file(t.get_oid(1), "f.txt"));
+    assert!(!t.branch_exists("_loom-track"));
+}
+
+#[test]
+fn fold_several_commits_to_a_branch_refusal_leaves_the_index_as_it_was() {
+    // The refusal aborts a rebase that has already autostashed.
+    let (t, redundant, keeper) = crate::core::test_helpers::repo_with_a_redundant_commit_below();
+    t.create_branch_at(
+        "beta",
+        &t.find_remote_branch_target("origin/main").to_string(),
+    );
+    let staged_before = stage_a_tracked_edit(&t);
+
+    let err = super::move_commits_and_report(
+        &t.workdir(),
+        &t.repo,
+        &[redundant.to_string(), keeper.to_string()],
+        "beta",
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("replays empty"), "{err}");
+    assert_eq!(
+        crate::git::diff_cached(&t.workdir()).unwrap(),
+        staged_before
+    );
+}
+
+#[test]
+fn fold_several_commits_relative_refusal_leaves_the_index_as_it_was() {
+    let (t, redundant, keeper) = crate::core::test_helpers::repo_with_a_redundant_commit_below();
+    // Somewhere in the weave to move them to: the base is upstream, not in it.
+    let anchor = t.commit_multi(&[("anchor.txt", "anchor\n")], "anchor");
+    let staged_before = stage_a_tracked_edit(&t);
+
+    let err = super::move_commits_relative_and_report(
+        &t.repo,
+        &[redundant.to_string(), keeper.to_string()],
+        &anchor.to_string(),
+        Position::Above,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("replays empty"), "{err}");
+    assert_eq!(
+        crate::git::diff_cached(&t.workdir()).unwrap(),
+        staged_before
+    );
+}
+
+/// A staged edit to a *tracked* file is the case that goes wrong: git's
+/// autostash replay brings a staged new file back staged, but a modification
+/// comes back unstaged.
+fn stage_a_tracked_edit(t: &TestRepo) -> String {
+    t.write_file("three.txt", "three\nstaged edit\n");
+    t.stage_files(&["three.txt"]);
+    crate::git::diff_cached(&t.workdir()).unwrap()
 }

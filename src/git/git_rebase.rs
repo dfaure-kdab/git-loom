@@ -239,7 +239,40 @@ pub fn skip_empty_stops(
         let Some(sha) = stopped_sha(git_dir) else {
             return Ok(outcome);
         };
-        if has_local_changes(workdir) || !replays_empty(workdir, &sha) {
+        if !replays_empty(workdir, &sha) {
+            return Ok(outcome);
+        }
+
+        let short = super::short_hash(&sha).to_string();
+        let dirty = has_local_changes(workdir);
+
+        // Classified before the working-tree guard, because whether the history
+        // already has this commit's changes does not depend on the tree. The
+        // *action* does: an abort is a hard reset, so over work the user did
+        // while the rebase was paused it refuses and leaves everything alone.
+        if protected.iter().any(|target| shas_match(target, &sha)) {
+            let cause = anyhow::Error::new(ReplayedEmpty(sha.clone()));
+            if dirty {
+                // Not "run `loom abort`": that is the same hard reset, so it
+                // would throw away the work this refusal just protected.
+                return Err(cause.context(format!(
+                    "Commit `{short}` {REPLAYS_EMPTY}\n\
+                     Your uncommitted changes are in the way of the undo — commit or \
+                     stash them, then run `loom abort`"
+                )));
+            }
+            return Err(rebase_abort_then_cleanup(
+                workdir,
+                cause.context(format!(
+                    "Commit `{short}` {REPLAYS_EMPTY}\n\
+                     Nothing was rewritten. `loom drop {short} -y` removes it for good"
+                )),
+                || {},
+            ));
+        }
+
+        // `--skip` is a hard reset too, so it never runs over a tree with work.
+        if dirty {
             return Ok(outcome);
         }
         // A `--skip` that leaves the rebase where it was would loop here.
@@ -247,19 +280,6 @@ pub fn skip_empty_stops(
             return Ok(outcome);
         }
 
-        if protected.iter().any(|target| shas_match(target, &sha)) {
-            let short = super::short_hash(&sha);
-            return Err(rebase_abort_then_cleanup(
-                workdir,
-                anyhow::anyhow!(
-                    "Commit `{short}` replays empty — the commits below it already have its changes\n\
-                     Nothing was rewritten. `loom drop {short} -y` removes it for good"
-                ),
-                || {},
-            ));
-        }
-
-        let short = super::short_hash(&sha).to_string();
         match rebase_outcome(git_dir, super::run_git(workdir, &["rebase", "--skip"])) {
             Ok(next) => outcome = next,
             Err(e) => return Err(rebase_abort_then_cleanup(workdir, e, || {})),
@@ -267,6 +287,60 @@ pub fn skip_empty_stops(
         crate::core::msg::warn(&format!("Dropped `{short}` — it replays empty here"));
     }
     Ok(outcome)
+}
+
+/// The first line of the empty-replay refusal, wherever it is reported.
+pub const REPLAYS_EMPTY: &str = "replays empty — the commits below it already have its changes";
+
+/// Marker under the refusal [`skip_empty_stops`] returns, carrying git's
+/// `stopped-sha` so a caller whose own undo removes that commit can replace a
+/// hint that would then name nothing.
+///
+/// `main.rs` prints only the outermost message, so the text above stays what
+/// the user reads. The sha is whatever git wrote, abbreviated on older
+/// versions, so it is only ever handed back to git to resolve.
+#[derive(Debug)]
+pub(crate) struct ReplayedEmpty(String);
+
+impl std::fmt::Display for ReplayedEmpty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "commit {} replayed empty", self.0)
+    }
+}
+
+impl std::error::Error for ReplayedEmpty {}
+
+/// The hash of the commit `err` refused over, if it is that refusal.
+pub fn replayed_empty_hash(err: &anyhow::Error) -> Option<&str> {
+    err.downcast_ref::<ReplayedEmpty>().map(|e| e.0.as_str())
+}
+
+/// Marker on an error raised before the rebase could start, so an undo knows
+/// nothing was rewritten and leaves the index where the user left it.
+#[derive(Debug)]
+pub(crate) struct RebaseNotStarted;
+
+impl std::fmt::Display for RebaseNotStarted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the rebase never started")
+    }
+}
+
+impl std::error::Error for RebaseNotStarted {}
+
+/// Tag `result`'s error as raised before the rebase started.
+pub fn before_rebase_starts<T>(result: Result<T>) -> Result<T> {
+    result.map_err(|e| {
+        let shown = format!("{e}");
+        anyhow::Error::new(RebaseNotStarted)
+            .context(e)
+            .context(shown)
+    })
+}
+
+/// Whether `err` was raised before the rebase started, so no undo is owed.
+pub fn rebase_never_started(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<RebaseNotStarted>().is_some()
 }
 
 /// Abort an in-progress rebase.

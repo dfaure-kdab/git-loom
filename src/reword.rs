@@ -119,6 +119,7 @@ pub fn reword_commit(repo: &Repository, commit_hash: &str, message: Option<Strin
             // branches, or saved patches of its own.
             rollback: Rollback::default(),
             context: serde_json::to_value(&ctx)?,
+            protect: Vec::new(),
         },
     )?;
 

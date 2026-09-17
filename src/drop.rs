@@ -194,6 +194,7 @@ fn drop_commit(repo: &Repository, commit_hash: &str, skip_confirm: bool) -> Resu
         command: "drop".to_string(),
         rollback: Rollback::default(),
         context: serde_json::to_value(&ctx)?,
+        protect: Vec::new(),
     };
     transaction::save(&git_dir, &state)?;
 

@@ -1183,12 +1183,16 @@ impl Weave {
 
     /// Add a branch name to a commit's `update_refs` so `--update-refs` keeps it in
     /// sync — how a caller tracks a commit's new OID across a rebase.
-    pub fn track_commit(&mut self, oid: Oid, ref_name: &str) {
+    ///
+    /// False when `oid` is not in the graph: nothing then updates the ref, and
+    /// a caller reading it back would report the hash it started from.
+    #[must_use]
+    pub fn track_commit(&mut self, oid: Oid, ref_name: &str) -> bool {
         for section in &mut self.branch_sections {
             for commit in &mut section.commits {
                 if commit.oid == oid {
                     commit.update_refs.push(ref_name.to_string());
-                    return;
+                    return true;
                 }
             }
         }
@@ -1198,9 +1202,10 @@ impl Weave {
                 && commit.oid == oid
             {
                 commit.update_refs.push(ref_name.to_string());
-                return;
+                return true;
             }
         }
+        false
     }
 
     fn set_command(&mut self, oid: Oid, command: Command) -> bool {
@@ -1571,22 +1576,60 @@ pub fn run_rebase_expecting_edit(
 
     protected.extend(also_protect.iter().map(|hash| hash.to_string()));
 
-    // Halt on a commit that replays empty instead of letting git drop it, and
-    // protect every commit this todo rewrites — a second `edit` in the same
-    // rebase is as much the caller's as the one it stops at first.
-    let git_dir = git::absolute_git_dir(workdir)?;
-    let outcome = git::skip_empty_stops(
-        workdir,
-        &git_dir,
-        &protected,
-        run_rebase_with_empty(workdir, upstream, todo_content, git::empty_stop_value())?,
-    )?;
+    // Protect every commit this todo rewrites — a second `edit` in the same
+    // rebase is as much the caller's as the one it stops at first. These are
+    // the todo's own hashes, abbreviated, which `shas_match` handles.
+    let outcome = halt_on_empty(workdir, upstream, todo_content, &protected)?;
 
     match outcome {
         RebaseOutcome::Paused => git::verify_paused_at(workdir, &expected),
         RebaseOutcome::Completed => Err(git::finished_without_stopping(&expected)),
         RebaseOutcome::Stopped => Err(git::abort_after_failure(workdir)),
     }
+}
+
+/// Execute a weave-based rebase whose result speaks for `protected`, by reading
+/// those commits back through a ref or by counting them (Spec 004).
+///
+/// Does NOT abort on a conflict — the outcome is the caller's, and a resumable
+/// one must carry `protected` in its `LoomState` so `loom continue` keeps
+/// protecting them. `protected` holds full object names: `skip_empty_stops`
+/// matches on the shorter string, so a short ID would over-protect.
+pub fn run_rebase_protecting(
+    workdir: &Path,
+    upstream: Option<&str>,
+    todo_content: &str,
+    protected: &[String],
+) -> Result<RebaseOutcome> {
+    // Checked in release too: this runs once per rebase, and a short ID here
+    // silently protects every commit sharing its prefix. 40 for SHA-1, 64 for
+    // SHA-256.
+    if let Some(bad) = protected
+        .iter()
+        .find(|hash| !matches!(hash.len(), 40 | 64) || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return git::before_rebase_starts(Err(anyhow::anyhow!(
+            "Internal error: `{bad}` is not a full object name"
+        )));
+    }
+    halt_on_empty(workdir, upstream, todo_content, protected)
+}
+
+/// Run the todo with `--empty=stop` and carry it past every empty replay that
+/// is not `protected` (Spec 004).
+fn halt_on_empty(
+    workdir: &Path,
+    upstream: Option<&str>,
+    todo_content: &str,
+    protected: &[String],
+) -> Result<RebaseOutcome> {
+    let git_dir = git::absolute_git_dir(workdir)?;
+    git::skip_empty_stops(
+        workdir,
+        &git_dir,
+        protected,
+        run_rebase_with_empty(workdir, upstream, todo_content, git::empty_stop_value())?,
+    )
 }
 
 /// The commits a todo marks `edit` — the ones a caller drives and must not
@@ -1662,22 +1705,26 @@ fn run_rebase_with_empty(
 
     use crate::trace as loom_trace;
 
-    // Neither way this rebase moves a branch ref goes through git's check
-    // against moving a branch checked out in another worktree, so do it here,
-    // before anything is rewritten.
-    git::ensure_not_checked_out_elsewhere(workdir, &rewritten_branches(workdir, todo_content))?;
+    // Everything up to the spawn below is pre-flight, and its failures are
+    // tagged so a caller's undo knows nothing was rewritten.
+    let prepared = git::before_rebase_starts((|| {
+        // Neither way this rebase moves a branch ref goes through git's check
+        // against moving a branch checked out in another worktree, so do it
+        // here, before anything is rewritten.
+        git::ensure_not_checked_out_elsewhere(workdir, &rewritten_branches(workdir, todo_content))?;
 
-    // Resolve the git dir up front: both exits below need it, and failing
-    // afterwards would strand a resumable command's state file with its
-    // rebase already done.
-    let git_dir = git::absolute_git_dir(workdir)?;
+        // Resolve the git dir up front: both exits below need it, and failing
+        // afterwards would strand a resumable command's state file with its
+        // rebase already done.
+        let git_dir = git::absolute_git_dir(workdir)?;
+        let self_exe = git::loom_exe_path()?;
 
-    let self_exe = git::loom_exe_path()?;
-
-    let mut temp_file = tempfile::NamedTempFile::new()?;
-    temp_file.write_all(todo_content.as_bytes())?;
-    temp_file.flush()?;
-    let temp_path = temp_file.into_temp_path();
+        let mut temp_file = tempfile::NamedTempFile::new()?;
+        temp_file.write_all(todo_content.as_bytes())?;
+        temp_file.flush()?;
+        Ok((git_dir, self_exe, temp_file.into_temp_path()))
+    })())?;
+    let (git_dir, self_exe, temp_path) = prepared;
 
     let exe_str = self_exe.display().to_string().replace('\\', "/");
     let source_path = temp_path.display().to_string().replace('\\', "/");

@@ -443,6 +443,7 @@ fn absorb_abort_preserves_working_state() {
             ..Default::default()
         },
         context: serde_json::json!({ "dry_run": false }),
+        protect: Vec::new(),
     };
     crate::core::transaction::save(&git_dir, &state).unwrap();
 

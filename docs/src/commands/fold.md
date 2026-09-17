@@ -286,6 +286,25 @@ Arguments can be:
 - **Git references** — `HEAD`, `HEAD~2`, etc.
 - **`zz`** — reserved token for the unstaged working directory
 
+## Commits that are already upstream
+
+A fold replays the commits it touches onto the current upstream. If everything a
+commit changes is already there, it has nothing left to apply, and loom refuses
+rather than report a commit you never touched:
+
+```console
+$ loom fold d0 feature-b
+# ✗ Commit `4783c1b` replays empty — the commits below it already have its changes
+#   › Nothing was rewritten. `loom drop 4783c1b -y` removes it for good
+```
+
+This covers the commit you move and the commit you fold into. A redundant commit
+that is neither is dropped, and loom says so.
+
+The hint always names the commit that replayed empty, which is not always one
+you would want gone: when it is the *target* of the fold, dropping it removes
+what you were folding into. Nothing is rewritten either way.
+
 ## Conflicts
 
 The following fold operations support conflict recovery (pause/resume):

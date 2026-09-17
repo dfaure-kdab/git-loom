@@ -803,3 +803,133 @@ fn commit_unknown_option_reaches_git() {
         "git should reject an option loom passed through"
     );
 }
+
+#[test]
+fn commit_refuses_when_the_new_commit_replays_empty() {
+    // The branch section resets to the weave base, so a change the base
+    // already has replays empty there. Dropped, the branch ref would never
+    // move and `post_commit` would name the tip it was appended to.
+    let test_repo = TestRepo::new_with_remote();
+    let base = test_repo
+        .find_remote_branch_target("origin/main")
+        .to_string();
+
+    test_repo.create_branch_at("upstream-work", &base);
+    test_repo.switch_branch("upstream-work");
+    test_repo.commit_multi(&[("f.txt", "final\n")], "upstream adds f");
+    test_repo.push_branch_to_remote_main("upstream-work");
+
+    test_repo.switch_branch("integration");
+    test_repo.reset_hard(test_repo.find_remote_branch_target("origin/main"));
+    test_repo.commit_multi(&[("f.txt", "old\n")], "revert f");
+    let head_before = test_repo.head_oid();
+
+    // Putting `f.txt` back is new at HEAD but is what the base already holds.
+    test_repo.write_file("f.txt", "final\n");
+
+    let err = test_repo
+        .in_dir(|| {
+            run(
+                Some("feature-a".to_string()),
+                Some("Restore f".to_string()),
+                vec!["f.txt".to_string()],
+            )
+        })
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("replays empty"), "{err}");
+    assert!(
+        !err.contains("loom drop"),
+        "the rollback takes the commit with it: {err}"
+    );
+    assert!(err.contains("rolled back"), "{err}");
+    assert_eq!(test_repo.head_oid(), head_before, "{err}");
+    assert!(!test_repo.branch_exists("feature-a"), "{err}");
+    assert_eq!(test_repo.read_file("f.txt"), "final\n", "{err}");
+    assert!(
+        !crate::git::rebase_is_in_progress(test_repo.repo.path()),
+        "{err}"
+    );
+    assert!(
+        !test_repo
+            .repo
+            .path()
+            .join("loom")
+            .join("state.json")
+            .exists(),
+        "{err}"
+    );
+}
+
+#[test]
+fn commit_refuses_with_no_file_arguments_too() {
+    // Without file arguments nothing is saved aside, so the rollback is the
+    // `reset --mixed` alone — the changes come back, unstaged.
+    let test_repo = TestRepo::new_with_remote();
+    let base = test_repo
+        .find_remote_branch_target("origin/main")
+        .to_string();
+
+    test_repo.create_branch_at("upstream-work", &base);
+    test_repo.switch_branch("upstream-work");
+    test_repo.commit_multi(&[("f.txt", "final\n")], "upstream adds f");
+    test_repo.push_branch_to_remote_main("upstream-work");
+
+    test_repo.switch_branch("integration");
+    test_repo.reset_hard(test_repo.find_remote_branch_target("origin/main"));
+    test_repo.commit_multi(&[("f.txt", "old\n")], "revert f");
+    let head_before = test_repo.head_oid();
+
+    test_repo.write_file("f.txt", "final\n");
+    test_repo.stage_files(&["f.txt"]);
+    let staged_before = crate::git::diff_cached(&test_repo.workdir()).unwrap();
+
+    let err = test_repo
+        .in_dir(|| {
+            run(
+                Some("feature-a".to_string()),
+                Some("Restore f".to_string()),
+                vec![],
+            )
+        })
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("replays empty"), "{err}");
+    assert!(!err.contains("loom drop"), "{err}");
+    assert_eq!(test_repo.head_oid(), head_before, "{err}");
+    assert_eq!(test_repo.read_file("f.txt"), "final\n", "{err}");
+    assert!(!test_repo.branch_exists("feature-a"), "{err}");
+    assert_eq!(
+        crate::git::diff_cached(&test_repo.workdir()).unwrap(),
+        staged_before,
+        "the index must come back staged, not just the content: {err}"
+    );
+}
+
+/// A `loom commit` paused by an older binary stored the set-aside patch in the
+/// rollback; the resume must still find it there.
+#[test]
+fn after_continue_reads_a_state_file_without_the_saved_staged_field() {
+    let test_repo = TestRepo::new_with_remote();
+    test_repo.commit_multi(&[("kept.txt", "kept\n")], "base");
+    test_repo.write_file("kept.txt", "kept\nset aside\n");
+    test_repo.stage_files(&["kept.txt"]);
+    let aside = crate::git::diff_cached(&test_repo.workdir()).unwrap();
+    crate::git::run_git(&test_repo.workdir(), &["restore", "--staged", "."]).unwrap();
+
+    let rollback = crate::core::transaction::Rollback {
+        saved_staged_patch: aside.clone(),
+        ..Default::default()
+    };
+    test_repo.create_branch("feature-a");
+    let context = serde_json::json!({ "branch_name": "feature-a" });
+
+    super::after_continue(&test_repo.workdir(), &rollback, &context).unwrap();
+
+    assert_eq!(
+        crate::git::diff_cached(&test_repo.workdir()).unwrap(),
+        aside
+    );
+}

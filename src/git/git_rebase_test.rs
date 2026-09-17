@@ -556,3 +556,55 @@ fn a_dirty_submodule_is_not_a_local_change() {
     assert!(super::has_local_changes(&workdir));
     let _ = first;
 }
+
+/// A stop loom will not act on is not a conflict for the user to resolve, so
+/// the refusal fires whatever the tree holds — but the abort behind it is a
+/// hard reset, so over pause-time edits it refuses and touches nothing.
+#[test]
+fn a_protected_commit_is_refused_even_with_local_changes() {
+    let (t, keeper) = crate::core::test_helpers::repo_with_a_redundant_commit_above();
+    let workdir = t.workdir();
+    let git_dir = t.repo.path().to_path_buf();
+
+    let mut graph = weave::Weave::from_repo(&t.repo).unwrap();
+    assert!(graph.edit_commit(keeper));
+    weave::run_rebase_protecting(
+        &workdir,
+        Some(&graph.base_oid.to_string()),
+        &graph.to_todo(),
+        &[],
+    )
+    .unwrap();
+
+    // What a user does while an operation is paused.
+    t.write_file("three.txt", "edited while paused\n");
+    assert!(super::has_local_changes(&workdir));
+
+    let outcome = crate::git::continue_rebase(&workdir).unwrap();
+    let stopped = super::stopped_sha(&git_dir).expect("a stop to classify");
+    assert!(
+        super::replays_empty(&workdir, &stopped),
+        "the fixture must stop on an empty replay"
+    );
+
+    let protect = [stopped];
+    let err = crate::git::skip_empty_stops(&workdir, &git_dir, &protect, outcome)
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("replays empty"), "{err}");
+    assert_eq!(
+        t.read_file("three.txt"),
+        "edited while paused\n",
+        "an abort here is a hard reset over the user's own edits: {err}"
+    );
+    assert!(
+        crate::git::rebase_is_in_progress(&git_dir),
+        "nothing was undone: {err}"
+    );
+    assert!(
+        !err.contains("run `loom abort`") || err.contains("stash"),
+        "`loom abort` is the same hard reset, so it is not the bare advice: {err}"
+    );
+    crate::git::rebase_abort(&workdir).unwrap();
+}
