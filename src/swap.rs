@@ -44,17 +44,26 @@ fn swap_two_commits(repo: &Repository, hash_a: String, hash_b: String) -> Result
 
     let state = LoomState {
         command: "swap".to_string(),
-        rollback: Rollback::default(),
+        rollback: Rollback {
+            // The rebase autostashes, and the abort replays that into the
+            // working tree only — staged changes would come back unstaged.
+            saved_staged_patch: git::diff_cached(workdir)?,
+            ..Default::default()
+        },
         context: serde_json::to_value(&SwapContext {
             display_a: display_a.to_string(),
             display_b: display_b.to_string(),
         })?,
+        // A swap that silently dropped one of them is not a swap, and the
+        // success message names both.
+        protect: vec![hash_a.clone(), hash_b.clone()],
     };
     transaction::save(&git_dir, &state)?;
 
     let todo = graph.to_todo();
-    let outcome = weave::run_rebase(workdir, Some(&graph.base_oid.to_string()), &todo)
-        .map_err(|e| transaction::discard_state_after(workdir, &git_dir, e))?;
+    let base = graph.base_oid.to_string();
+    let outcome = weave::run_rebase_protecting(workdir, Some(&base), &todo, &state.protect)
+        .map_err(|e| transaction::roll_back_failed_rebase(workdir, &git_dir, &state, e))?;
     match outcome {
         RebaseOutcome::Completed => {
             transaction::delete(&git_dir)?;

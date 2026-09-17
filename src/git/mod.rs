@@ -29,10 +29,11 @@ pub use git_merge::{MergeOutcome, continue_merge, merge_abort, merge_is_in_progr
 #[cfg(test)]
 pub use git_rebase::rebase_onto;
 pub use git_rebase::{
-    AfterStop, RebaseOutcome, abort_after_failure, auto_merge_id, continue_rebase,
-    continue_rebase_expecting_edit, finished_without_stopping, has_unmerged_paths, rebase,
-    rebase_abort, rebase_abort_then_cleanup, rebase_is_in_progress, rebase_outcome,
-    rebase_progress, skip_empty_stops, verify_paused_at,
+    AfterStop, REPLAYS_EMPTY, RebaseOutcome, abort_after_failure, auto_merge_id,
+    before_rebase_starts, continue_rebase, continue_rebase_expecting_edit,
+    finished_without_stopping, has_unmerged_paths, rebase, rebase_abort, rebase_abort_then_cleanup,
+    rebase_is_in_progress, rebase_never_started, rebase_outcome, rebase_progress,
+    replayed_empty_hash, skip_empty_stops, verify_paused_at,
 };
 pub use git_worktree::ensure_not_checked_out_elsewhere;
 
@@ -100,6 +101,15 @@ const MIN_GIT_VERSION: (u32, u32) = (2, 40);
 pub fn absolute_git_dir(workdir: &Path) -> Result<PathBuf> {
     let out = run_git_stdout(workdir, &["rev-parse", "--absolute-git-dir"])?;
     Ok(PathBuf::from(out.trim()))
+}
+
+/// Whether `rev` is HEAD or one of its ancestors — whether a command that
+/// walks back from HEAD, `loom drop` among them, can still find it.
+///
+/// A commit a rollback has just orphaned still resolves; it is simply no longer
+/// reachable. A revision git cannot resolve at all reports the same.
+pub fn reaches_from_head(workdir: &Path, rev: &str) -> bool {
+    run_git(workdir, &["merge-base", "--is-ancestor", rev, "HEAD"]).is_ok()
 }
 
 /// Run a git command, capture output, trace-log it, and bail on failure.

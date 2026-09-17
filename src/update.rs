@@ -146,6 +146,7 @@ pub fn run(skip_confirm: bool) -> Result<()> {
             ..Default::default()
         },
         context: serde_json::to_value(&ctx)?,
+        protect: Vec::new(),
     };
     transaction::save(&git_dir, &state)?;
 

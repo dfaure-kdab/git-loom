@@ -48,6 +48,18 @@ git loom swap ca1 cb1
 # ! Cannot swap commits from different branch sections
 ```
 
+## Commits that are already upstream
+
+A swap replays both commits at their new positions. If everything one of them
+changes is already upstream, it has nothing left to apply, and loom refuses
+rather than report a swap of a commit it dropped:
+
+```console
+$ loom swap ab cd
+# ✗ Commit `4783c1b` replays empty — the commits below it already have its changes
+#   › Nothing was rewritten. `loom drop 4783c1b -y` removes it for good
+```
+
 ## Conflicts
 
 If a conflict occurs during the rebase, the operation is paused:

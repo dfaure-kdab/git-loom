@@ -12,6 +12,11 @@ pub struct LoomState {
     pub command: String,
     /// Shared rollback information for `loom abort`.
     pub rollback: Rollback,
+    /// Commits `loom continue` must not let the rebase drop as empty, because
+    /// a ref this command reads back follows them (see
+    /// [`crate::core::weave::run_rebase_protecting`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protect: Vec<String>,
     /// Command-specific resume context (opaque JSON).
     pub context: serde_json::Value,
 }
@@ -42,6 +47,16 @@ pub struct Rollback {
 }
 
 impl Rollback {
+    /// Remove the refs the operation created, and nothing else.
+    ///
+    /// For a failure that rewrote nothing: the temp branches are still loom's
+    /// to clean up, while the index and worktree were never touched.
+    pub fn delete_temp_branches(&self, workdir: &Path) {
+        for branch in &self.delete_branches {
+            let _ = git::branch_delete(workdir, branch);
+        }
+    }
+
     /// Apply the rollback after `git rebase --abort` has run, acting on whichever
     /// fields are populated.
     pub fn apply_abort(&self, workdir: &Path) -> Result<()> {
@@ -320,9 +335,26 @@ pub fn continue_cmd(workdir: &Path, git_dir: &Path) -> Result<()> {
     if git::rebase_is_in_progress(git_dir) {
         // A stop on a commit the new history already contains is not a conflict
         // to resolve (`skip_empty_stops` establishes that before skipping
-        // anything). Nothing is protected: every resumable owner has already
-        // made its rewrite by the time it can pause.
-        match git::skip_empty_stops(workdir, git_dir, &[], git::continue_rebase(workdir)?)? {
+        // anything). A resumable owner has already made its own rewrite by the
+        // time it can pause; `protect` covers the commits it only follows.
+        // Only the empty-replay refusal is undone here (Spec 014), and only
+        // once it has ended the rebase: the refusal leaves a live one when the
+        // tree is dirty, and its message says to save that work before undoing
+        // anything. Everything else is the user's to look at, with the state
+        // still describing what `loom abort` would undo.
+        let outcome = git::skip_empty_stops(
+            workdir,
+            git_dir,
+            &state.protect,
+            git::continue_rebase(workdir)?,
+        )
+        .map_err(|e| match git::replayed_empty_hash(&e) {
+            Some(_) if !git::rebase_is_in_progress(git_dir) => {
+                roll_back_failed_rebase(workdir, git_dir, &state, e)
+            }
+            _ => e,
+        })?;
+        match outcome {
             git::RebaseOutcome::Paused => {
                 warn_paused_at_edit(Some(&state.command));
                 return Ok(());
@@ -348,6 +380,68 @@ pub fn continue_cmd(workdir: &Path, git_dir: &Path) -> Result<()> {
     dispatch_after_continue(workdir, &state)?;
     delete(git_dir)?;
     Ok(())
+}
+
+/// Undo a saved operation whose rebase failed, and remove its state file.
+///
+/// The rebase is normally over by the time this runs, so what is left is
+/// `loom abort`'s half of the undo; the state goes with it, or `main.rs`
+/// refuses every later command as paused. A rebase still in progress is the
+/// exception: rolling back on top of one makes the mess worse, so the state
+/// stays for `loom abort`. `cause` is returned either way — the top-level
+/// handler prints one message, and it must be the reason the command failed.
+pub fn roll_back_failed_rebase(
+    workdir: &Path,
+    git_dir: &Path,
+    state: &LoomState,
+    cause: anyhow::Error,
+) -> anyhow::Error {
+    if git::rebase_is_in_progress(git_dir) || git::merge_is_in_progress(git_dir) {
+        crate::core::msg::warn(
+            "the rebase is still in progress, so nothing was rolled back — run `loom abort`",
+        );
+        return cause;
+    }
+    // A pre-flight refusal rewrote nothing, so the index and worktree are not
+    // ours to restore — `apply_abort` would reset the index and re-apply a
+    // patch that only warns if it will not apply, losing staging that was never
+    // at risk. The refs loom made are still its own to take back.
+    if git::rebase_never_started(&cause) {
+        state.rollback.delete_temp_branches(workdir);
+        if let Err(e) = delete(git_dir) {
+            crate::core::msg::warn(&format!("could not remove the loom state file: {e}"));
+        }
+        return cause;
+    }
+    if let Err(e) = state.rollback.apply_abort(workdir) {
+        crate::core::msg::warn(&format!("{ROLLBACK_FAILED_HINT} ({e})"));
+        return cause;
+    }
+    if let Err(e) = delete(git_dir) {
+        // Left behind, it reports a paused operation to every later command.
+        crate::core::msg::warn(&format!("could not remove the loom state file: {e}"));
+    }
+    // The rollback may have taken the commit the refusal named with it —
+    // `commit`'s does — and `loom drop` cannot find one history no longer has.
+    match git::replayed_empty_hash(&cause) {
+        Some(sha) if !git::reaches_from_head(workdir, sha) => {
+            let sha = sha.to_string();
+            empty_replay_rolled_back(cause, &sha, &state.command)
+        }
+        _ => cause,
+    }
+}
+
+/// The empty-replay refusal for an operation whose undo removes the commit.
+///
+/// Built on `cause` so the `ReplayedEmpty` marker stays classifiable above.
+fn empty_replay_rolled_back(cause: anyhow::Error, sha: &str, command: &str) -> anyhow::Error {
+    let short = git::short_hash(sha);
+    cause.context(format!(
+        "Commit `{short}` {}\n\
+         The `loom {command}` was rolled back, so there is nothing left to drop",
+        git::REPLAYS_EMPTY
+    ))
 }
 
 /// What to say when the abort itself fails: nothing was rolled back, so running
@@ -522,6 +616,7 @@ mod tests {
                 ..Default::default()
             },
             context: serde_json::json!({ "branch_name": "feature" }),
+            protect: vec!["def456".to_string()],
         };
 
         let json = serde_json::to_string_pretty(&state).unwrap();
@@ -529,6 +624,218 @@ mod tests {
         assert_eq!(restored.command, "commit");
         assert_eq!(restored.rollback.reset_mixed_to, "abc123");
         assert_eq!(restored.rollback.delete_branches, vec!["new-branch"]);
+        assert_eq!(restored.protect, vec!["def456"]);
+    }
+
+    /// A state file written before `protect` existed must still load.
+    #[test]
+    fn state_without_protect_loads() {
+        let json = r#"{"command":"fold","rollback":{},"context":null}"#;
+        let restored: LoomState = serde_json::from_str(json).unwrap();
+        assert!(restored.protect.is_empty());
+    }
+
+    /// `--empty` outlives `git rebase --continue`, so the state file is what
+    /// carries the protection across the pause.
+    #[test]
+    fn continue_refuses_when_a_protected_commit_replays_empty() {
+        // Paused at an `edit` rather than a conflict: either way the rebase
+        // that continues is the one `run_rebase_protecting` started, and the
+        // redundant commit above the stop replays on the continue.
+        let (t, keeper) = crate::core::test_helpers::repo_with_a_redundant_commit_above();
+        let workdir = t.workdir();
+        let git_dir = t.repo.path().to_path_buf();
+        let redundant = t.get_branch_target("alpha").to_string();
+
+        let mut graph = crate::core::weave::Weave::from_repo(&t.repo).unwrap();
+        assert!(graph.edit_commit(keeper));
+        let protect = vec![redundant.clone()];
+        let outcome = crate::core::weave::run_rebase_protecting(
+            &workdir,
+            Some(&graph.base_oid.to_string()),
+            &graph.to_todo(),
+            &protect,
+        )
+        .unwrap();
+        assert_eq!(outcome, git::RebaseOutcome::Paused);
+
+        t.create_branch_at("_loom-track", &redundant);
+        save(
+            &git_dir,
+            &LoomState {
+                command: "fold".to_string(),
+                rollback: Rollback {
+                    delete_branches: vec!["_loom-track".to_string()],
+                    ..Default::default()
+                },
+                context: serde_json::Value::Null,
+                protect,
+            },
+        )
+        .unwrap();
+
+        let err = continue_cmd(&workdir, &git_dir).unwrap_err().to_string();
+
+        assert!(err.contains("replays empty"), "{err}");
+        assert!(
+            err.contains("loom drop"),
+            "this rollback keeps the commit, so the hint stands: {err}"
+        );
+        assert!(!git::rebase_is_in_progress(&git_dir), "{err}");
+        assert!(
+            !state_path(&git_dir).exists(),
+            "the state must go with the rollback, or `loom drop` is refused"
+        );
+        assert!(
+            !t.branch_exists("_loom-track"),
+            "the rollback runs too, not just the state removal"
+        );
+    }
+
+    /// The refusal leaves a live rebase when the tree is dirty, because the
+    /// undo is a hard reset: `continue` must leave the work, the rebase and the
+    /// state alone. (That it also stops warning "run `loom abort`" over a
+    /// message saying to save the work first is not visible from here.)
+    #[test]
+    fn continue_does_not_undo_over_a_dirty_tree() {
+        let (t, keeper) = crate::core::test_helpers::repo_with_a_redundant_commit_above();
+        let workdir = t.workdir();
+        let git_dir = t.repo.path().to_path_buf();
+        let mut graph = crate::core::weave::Weave::from_repo(&t.repo).unwrap();
+        assert!(graph.edit_commit(keeper));
+        // Every commit of the branch, so whichever replays empty first is one
+        // the refusal has to catch.
+        let base = graph.base_oid.to_string();
+        let protect: Vec<String> =
+            git::run_git_stdout(&workdir, &["rev-list", &format!("{base}..alpha")])
+                .unwrap()
+                .lines()
+                .map(str::to_string)
+                .collect();
+        crate::core::weave::run_rebase_protecting(
+            &workdir,
+            Some(&base),
+            &graph.to_todo(),
+            &protect,
+        )
+        .unwrap();
+
+        t.write_file("three.txt", "edited while paused\n");
+        save(
+            &git_dir,
+            &LoomState {
+                command: "commit".to_string(),
+                rollback: Rollback {
+                    reset_mixed_to: base.clone(),
+                    ..Default::default()
+                },
+                context: serde_json::Value::Null,
+                protect,
+            },
+        )
+        .unwrap();
+
+        let err = continue_cmd(&workdir, &git_dir).unwrap_err().to_string();
+
+        assert!(err.contains("replays empty"), "{err}");
+        assert!(err.contains("stash"), "{err}");
+        assert_eq!(t.read_file("three.txt"), "edited while paused\n", "{err}");
+        assert!(state_path(&git_dir).exists(), "nothing was undone: {err}");
+        assert!(git::rebase_is_in_progress(&git_dir), "{err}");
+        git::rebase_abort(&workdir).unwrap();
+    }
+
+    /// An undo that resets past the commit takes it with it, so the refusal
+    /// must not send the user after it.
+    #[test]
+    fn continue_drops_the_drop_hint_when_the_rollback_removes_the_commit() {
+        let (t, keeper) = crate::core::test_helpers::repo_with_a_redundant_commit_above();
+        let workdir = t.workdir();
+        let git_dir = t.repo.path().to_path_buf();
+        let redundant = t.get_branch_target("alpha").to_string();
+
+        let mut graph = crate::core::weave::Weave::from_repo(&t.repo).unwrap();
+        assert!(graph.edit_commit(keeper));
+        let protect = vec![redundant];
+        crate::core::weave::run_rebase_protecting(
+            &workdir,
+            Some(&graph.base_oid.to_string()),
+            &graph.to_todo(),
+            &protect,
+        )
+        .unwrap();
+
+        // `commit`'s shape: its undo resets past the commit it made, leaving
+        // the one the refusal names outside the history `loom drop` searches.
+        save(
+            &git_dir,
+            &LoomState {
+                command: "commit".to_string(),
+                rollback: Rollback {
+                    reset_mixed_to: graph.base_oid.to_string(),
+                    ..Default::default()
+                },
+                context: serde_json::Value::Null,
+                protect,
+            },
+        )
+        .unwrap();
+
+        let err = continue_cmd(&workdir, &git_dir).unwrap_err().to_string();
+
+        assert!(err.contains("replays empty"), "{err}");
+        assert!(!err.contains("loom drop"), "{err}");
+        assert!(err.contains("rolled back"), "{err}");
+        assert!(!state_path(&git_dir).exists(), "{err}");
+    }
+
+    /// Rolling back on top of a live rebase would make the mess worse, so the
+    /// state has to survive for `loom abort`.
+    #[test]
+    fn a_failed_abort_keeps_the_state_for_loom_abort() {
+        let t = repo_stopped_on_conflict();
+        let workdir = t.workdir();
+        let git_dir = t.repo.path().to_path_buf();
+        let state = LoomState {
+            command: "fold".to_string(),
+            rollback: Rollback {
+                delete_branches: vec!["topic".to_string()],
+                ..Default::default()
+            },
+            context: serde_json::Value::Null,
+            protect: Vec::new(),
+        };
+        save(&git_dir, &state).unwrap();
+
+        let err = roll_back_failed_rebase(&workdir, &git_dir, &state, anyhow::anyhow!("boom"));
+
+        assert_eq!(err.to_string(), "boom");
+        assert!(state_path(&git_dir).exists());
+        assert!(t.branch_exists("topic"), "the rollback must not have run");
+        git::rebase_abort(&workdir).unwrap();
+    }
+
+    /// A half-applied undo is `loom abort`'s to finish, so the state stays.
+    #[test]
+    fn a_failed_rollback_keeps_the_state_too() {
+        let t = crate::core::test_helpers::TestRepo::new();
+        let workdir = t.workdir();
+        let git_dir = t.repo.path().to_path_buf();
+        let state = LoomState {
+            command: "commit".to_string(),
+            rollback: Rollback {
+                reset_mixed_to: "0".repeat(40),
+                ..Default::default()
+            },
+            context: serde_json::Value::Null,
+            protect: Vec::new(),
+        };
+        save(&git_dir, &state).unwrap();
+
+        let err = roll_back_failed_rebase(&workdir, &git_dir, &state, anyhow::anyhow!("boom"));
+
+        assert_eq!(err.to_string(), "boom");
+        assert!(state_path(&git_dir).exists());
     }
 
     /// Stop a rebase on a conflict and return the repo it happened in.
@@ -638,6 +945,7 @@ mod tests {
             command: "update".to_string(),
             rollback: Rollback::default(),
             context: serde_json::Value::Null,
+            protect: Vec::new(),
         };
         save(dir.path(), &state).unwrap();
         assert_eq!(
@@ -661,6 +969,7 @@ mod tests {
             command: command.to_string(),
             rollback: Rollback::default(),
             context: serde_json::Value::Null,
+            protect: Vec::new(),
         };
 
         save(dir.path(), &make("update")).unwrap();
@@ -696,6 +1005,7 @@ mod tests {
                 command: "commit".to_string(),
                 rollback: Rollback::default(),
                 context: serde_json::Value::Null,
+                protect: Vec::new(),
             },
         )
         .unwrap();
@@ -752,6 +1062,7 @@ mod tests {
                     ..Default::default()
                 },
                 context: serde_json::Value::Null,
+                protect: Vec::new(),
             },
         )
         .unwrap();
@@ -804,6 +1115,7 @@ mod tests {
                 command: "drop".to_string(),
                 rollback: Rollback::default(),
                 context: serde_json::Value::Null,
+                protect: Vec::new(),
             },
         )
         .unwrap();

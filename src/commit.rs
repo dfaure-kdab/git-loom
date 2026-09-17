@@ -16,6 +16,15 @@ use crate::git;
 #[derive(Serialize, Deserialize)]
 struct CommitContext {
     branch_name: String,
+    /// Staged work set aside before staging this commit's files, put back once
+    /// the commit lands. The rollback keeps the whole pre-commit index instead,
+    /// so this cannot live in `Rollback` (see [`run`]).
+    ///
+    /// `None` only in a state file written before this field existed, where the
+    /// same patch is the rollback's — an abort reading that file restores the
+    /// set-aside subset it always did, not the whole index.
+    #[serde(default)]
+    saved_staged: Option<String>,
 }
 
 /// Create a commit without leaving the integration branch.
@@ -59,6 +68,22 @@ pub fn run(
          Use `git commit` directly on feature branches",
     )?;
 
+    // A loose commit lands on the integration branch itself: no rebase, no
+    // state file, so nothing below it needs the index snapshot.
+    let loose = integration
+        || (branch.is_none()
+            && info.branch_name == repo::upstream_local_branch(&info.upstream.label));
+
+    // The index exactly as the user left it: what `loom abort` and a refused
+    // rebase have to put back, since the reset below them undoes the commit
+    // and leaves its content unstaged. A whole staged binary rides along into
+    // `state.json`; losing the staging is the worse trade.
+    let index_before = if loose {
+        String::new()
+    } else {
+        git::diff_cached(&workdir)?
+    };
+
     // Stage files, saving aside any pre-existing staged files not in the
     // target list so they don't accidentally end up in this commit.
     let saved_staged = if patch {
@@ -80,9 +105,6 @@ pub fn run(
     // feature branch. Happens with -i, or with no -b when the local branch name
     // matches the upstream's local counterpart (e.g. "main" tracking
     // "origin/main").
-    let loose = integration
-        || (branch.is_none()
-            && info.branch_name == repo::upstream_local_branch(&info.upstream.label));
     if loose {
         let result = do_commit();
         git::restore_staged_patch(&workdir, &saved_staged)?;
@@ -145,20 +167,30 @@ pub fn run(
     }
     let ctx = CommitContext {
         branch_name: branch_name.clone(),
+        saved_staged: Some(saved_staged.clone()),
     };
     let state = LoomState {
         command: "commit".to_string(),
         rollback: Rollback {
             reset_mixed_to: saved_head.clone(),
             delete_branches,
-            saved_staged_patch: saved_staged.clone(),
+            saved_staged_patch: index_before,
             ..Default::default()
         },
         context: serde_json::to_value(&ctx)?,
+        // `post_commit` names the new commit by reading `branch_name` back, so
+        // a replay that came out empty would report the tip it was appended to.
+        protect: vec![head_oid.to_string()],
     };
     transaction::save(&git_dir, &state)?;
 
-    match weave::run_rebase(&workdir, Some(&graph.base_oid.to_string()), &todo)? {
+    let base = graph.base_oid.to_string();
+
+    // The rollback undoes the commit, so an empty replay is reported by
+    // `roll_back_failed_rebase`, which knows whether that undo ran.
+    let outcome = weave::run_rebase_protecting(&workdir, Some(&base), &todo, &state.protect)
+        .map_err(|e| transaction::roll_back_failed_rebase(&workdir, &git_dir, &state, e))?;
+    match outcome {
         RebaseOutcome::Completed => {
             transaction::delete(&git_dir)?;
             post_commit(&workdir, &branch_name, &saved_staged)?;
@@ -182,7 +214,10 @@ pub fn after_continue(
 ) -> Result<()> {
     let ctx: CommitContext =
         serde_json::from_value(context.clone()).context("Failed to parse commit resume context")?;
-    post_commit(workdir, &ctx.branch_name, &rollback.saved_staged_patch)
+    let saved_staged = ctx
+        .saved_staged
+        .unwrap_or_else(|| rollback.saved_staged_patch.clone());
+    post_commit(workdir, &ctx.branch_name, &saved_staged)
 }
 
 /// Post-rebase work: restore staged changes and print success message.

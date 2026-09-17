@@ -372,7 +372,15 @@ fn move_commits_and_report(
             return Err(err);
         }
         Err(e) => {
-            if created {
+            // The refusal aborts a rebase that has already autostashed, and
+            // that replay comes back unstaged — same as the branch above. A
+            // pre-flight refusal never touched the index, so it is left alone.
+            if !git::rebase_never_started(&e) {
+                restage_or_park(workdir, repo.path(), &saved_staged);
+            }
+            // Same guard as the branch above: the branch may be the checked-out
+            // ref while a failed abort leaves the rebase on disk.
+            if created && !git::rebase_is_in_progress(repo.path()) {
                 let _ = git::branch_delete(workdir, branch_name);
             }
             return Err(e);
@@ -414,12 +422,19 @@ fn move_commits_and_report(
 /// a patch file instead of going with the error.
 fn abort_and_restage(workdir: &Path, repo: &Repository, saved_staged: &str) -> anyhow::Error {
     let err = git::abort_after_failure(workdir);
-    if git::rebase_is_in_progress(repo.path()) {
+    restage_or_park(workdir, repo.path(), saved_staged);
+    err
+}
+
+/// Put `saved_staged` back once the rebase is over, or park it in a patch file
+/// if an abort failed and left one running: resetting the index on top of a
+/// live rebase makes the mess worse.
+fn restage_or_park(workdir: &Path, git_dir: &Path, saved_staged: &str) {
+    if git::rebase_is_in_progress(git_dir) {
         save_or_warn(workdir, "unrestored-staged", saved_staged, true);
     } else {
         restage_after_abort(workdir, saved_staged);
     }
-    err
 }
 
 /// `fold <commit>... --above|--below <commit>`: move commits next to another.
@@ -467,6 +482,20 @@ fn plan_relative(
     Ok((graph, parked))
 }
 
+/// Point `_loom-track` at `oid` and have the todo keep it there.
+///
+/// The branch must exist before the rebase *and* carry an `update-ref` line, so
+/// a commit outside the graph is refused rather than left with a ref that never
+/// moves — the caller would read its starting hash back as the result.
+fn track_through_rebase(graph: &mut Weave, workdir: &Path, oid: git2::Oid) -> Result<()> {
+    git::branch_force_create(workdir, TRACK_BRANCH, &oid.to_string())?;
+    if !graph.track_commit(oid, TRACK_BRANCH) {
+        let _ = git::branch_delete(workdir, TRACK_BRANCH);
+        return Err(weave::not_in_the_weave(oid));
+    }
+    Ok(())
+}
+
 /// Resumable single-commit relative move; the moved commit is tracked
 /// through `_loom-track` so the result can name its new hash.
 fn fold_commit_relative(
@@ -484,8 +513,7 @@ fn fold_commit_relative(
         target_hash,
         position,
     )?;
-    git::branch_force_create(workdir, TRACK_BRANCH, commit_hash)?;
-    graph.track_commit(git2::Oid::from_str(commit_hash)?, TRACK_BRANCH);
+    track_through_rebase(&mut graph, workdir, git2::Oid::from_str(commit_hash)?)?;
 
     let ctx = serde_json::to_value(FoldVariant::CommitRelative {
         commit_hash: commit_hash.to_string(),
@@ -502,6 +530,9 @@ fn fold_commit_relative(
             ..Default::default()
         },
         context: ctx,
+        // `_loom-track` follows the moved commit; the target goes in too,
+        // because a move relative to a commit that vanished is meaningless.
+        protect: vec![commit_hash.to_string(), target_hash.to_string()],
     };
     transaction::save(&git_dir, &state)?;
 
@@ -509,13 +540,9 @@ fn fold_commit_relative(
     // Not `discard_state_after`: it leaves the temp branch, so a rebase
     // refused before it starts (a branch checked out elsewhere) would leave
     // `_loom-track` behind as a branch `status` then lists.
-    let outcome =
-        weave::run_rebase(workdir, Some(&graph.base_oid.to_string()), &todo).map_err(|e| {
-            git::rebase_abort_then_cleanup(workdir, e, || {
-                let _ = git::branch_delete(workdir, TRACK_BRANCH);
-                let _ = transaction::delete(&git_dir);
-            })
-        })?;
+    let base = graph.base_oid.to_string();
+    let outcome = weave::run_rebase_protecting(workdir, Some(&base), &todo, &state.protect)
+        .map_err(|e| transaction::roll_back_failed_rebase(workdir, &git_dir, &state, e))?;
     match outcome {
         RebaseOutcome::Completed => {
             transaction::delete(&git_dir)?;
@@ -547,7 +574,24 @@ fn move_commits_relative_and_report(
 
     let saved_staged = git::diff_cached(workdir)?;
     let todo = graph.to_todo();
-    match weave::run_rebase(workdir, Some(&graph.base_oid.to_string()), &todo)? {
+    // The count has to be true: a moved commit dropped as empty is one the user
+    // is told moved and cannot find. The target goes in because a move relative
+    // to a commit that vanished is meaningless.
+    let protect: Vec<String> = commit_hashes
+        .iter()
+        .cloned()
+        .chain([target_hash.to_string()])
+        .collect();
+    let base = graph.base_oid.to_string();
+    let outcome = weave::run_rebase_protecting(workdir, Some(&base), &todo, &protect)
+        // The refusal aborts a rebase that has already autostashed, and that
+        // replay comes back unstaged. A pre-flight refusal never touched it.
+        .inspect_err(|e| {
+            if !git::rebase_never_started(e) {
+                restage_or_park(workdir, repo.path(), &saved_staged);
+            }
+        })?;
+    match outcome {
         RebaseOutcome::Completed => {}
         RebaseOutcome::Stopped | RebaseOutcome::Paused => {
             return Err(abort_and_restage(workdir, repo, &saved_staged));
@@ -802,6 +846,32 @@ fn run_patch_fold_commit_to_commit(
     let selections = staging::run_commit_hunk_picker(workdir, source_hash, &[], theme)?
         .ok_or_else(msg::cancelled)?;
 
+    let (new_source_hash, new_target_hash) =
+        fold_selected_hunks_to_commit(repo, workdir, source_hash, target_hash, &selections)?;
+
+    msg::success(&format!(
+        "Moved hunk(s) from `{}` (now `{}`) into `{}` (now `{}`)",
+        git::short_hash(source_hash),
+        git::short_hash(&new_source_hash),
+        git::short_hash(target_hash),
+        git::short_hash(&new_target_hash)
+    ));
+
+    Ok(())
+}
+
+/// The rest of [`run_patch_fold_commit_to_commit`], once the hunks are picked;
+/// split off so tests can supply `selections` without the picker. Returns the
+/// hashes the source and the target ended up with.
+fn fold_selected_hunks_to_commit(
+    repo: &Repository,
+    workdir: &Path,
+    source_hash: &str,
+    target_hash: &str,
+    selections: &[FileEntry],
+) -> Result<(String, String)> {
+    let source_oid = git2::Oid::from_str(source_hash)?;
+
     if !selections
         .iter()
         .any(|f| f.hunks.iter().any(|h| h.selected))
@@ -809,9 +879,9 @@ fn run_patch_fold_commit_to_commit(
         bail!("No hunks selected");
     }
 
-    let gitlinks = picked_gitlinks(workdir, source_hash, &selections)?;
+    let gitlinks = picked_gitlinks(workdir, source_hash, selections)?;
 
-    let selected_patch = build_selected_patch(&selections);
+    let selected_patch = build_selected_patch(selections);
     if selected_patch.is_empty() && gitlinks.is_empty() {
         bail!("No text hunks selected — binary and deleted files are not supported with -p");
     }
@@ -842,18 +912,18 @@ fn run_patch_fold_commit_to_commit(
         return Err(e);
     }
 
-    if let Err(e) = apply_and_amend(workdir, &selections, &selected_patch, &gitlinks, true) {
+    if let Err(e) = apply_and_amend(workdir, selections, &selected_patch, &gitlinks, true) {
         return Err(git::rebase_abort_then_cleanup(workdir, e, || {
             let _ = git::branch_delete(workdir, TRACK_BRANCH);
             let _ = git::restore_staged_patch(workdir, &saved_staged);
         }));
     }
 
-    let new_source_hash = git::rev_parse(workdir, "HEAD")?;
+    let phase1_source_hash = git::rev_parse(workdir, "HEAD")?;
 
     // The source replays during this continue; dropping it as empty would
-    // leave the hash reported below naming someone else's commit.
-    let protect = [new_source_hash.clone()];
+    // leave the hash carried into phase 2 naming someone else's commit.
+    let protect = [phase1_source_hash.clone()];
     if let Err(e) =
         git::continue_rebase_expecting_edit(workdir, git::AfterStop::nothing().protecting(&protect))
     {
@@ -862,21 +932,36 @@ fn run_patch_fold_commit_to_commit(
         return Err(e);
     }
 
-    // Phase 2: edit target (new OID tracked via TRACK_BRANCH), add selected hunks.
-    let phase2_target_hash = git::rev_parse(workdir, TRACK_BRANCH)?;
-    let _ = git::branch_delete(workdir, TRACK_BRANCH);
-    let phase2_target_oid = git2::Oid::from_str(&phase2_target_hash)?;
+    // Phase 1 is already committed, so undoing anything from here means
+    // resetting over a working tree its rebase has restored. The snapshot
+    // predates `save_and_unstage_staged`, so it puts `saved_staged` back
+    // along with it.
+    let rollback = || {
+        let _ = git::branch_delete(workdir, TRACK_BRANCH);
+        rollback_fold(workdir, &saved_head, Some(&saved_refs), &saved_worktree);
+    };
 
-    // Re-open repo after phase 1 rebase (OIDs changed)
-    let repo2 = Repository::open(workdir)?;
-    let mut graph2 = Weave::from_repo(&repo2)?;
-    let _ = graph2.edit_commit(phase2_target_oid);
+    // Phase 2: edit target (new OID tracked via TRACK_BRANCH), add selected
+    // hunks. Everything here is phase 1's to undo, so one rollback covers it.
+    let plan_phase2 = || -> Result<(git2::Oid, Weave)> {
+        let phase2_target_hash = git::rev_parse(workdir, TRACK_BRANCH)?;
+        let _ = git::branch_delete(workdir, TRACK_BRANCH);
+        let phase2_target_oid = git2::Oid::from_str(&phase2_target_hash)?;
+
+        // Re-open repo after phase 1 rebase (OIDs changed)
+        let repo2 = Repository::open(workdir)?;
+        let mut graph2 = Weave::from_repo(&repo2)?;
+        let _ = graph2.edit_commit(phase2_target_oid);
+
+        // Phase 2 replays the source too, on a rewritten target, so its phase 1
+        // hash is stale by the end — track it to report the one that survives.
+        let phase1_source_oid = git2::Oid::from_str(&phase1_source_hash)?;
+        track_through_rebase(&mut graph2, workdir, phase1_source_oid)?;
+        Ok((phase2_target_oid, graph2))
+    };
+    let (phase2_target_oid, graph2) = plan_phase2().inspect_err(|_| rollback())?;
+
     let todo2 = graph2.to_todo();
-
-    // Phase 1 is already committed, so undoing phase 2 means resetting over a
-    // working tree its rebase has restored. The snapshot predates
-    // `save_and_unstage_staged`, so it puts `saved_staged` back along with it.
-    let rollback = || rollback_fold(workdir, &saved_head, Some(&saved_refs), &saved_worktree);
 
     if let Err(e) = weave::run_rebase_expecting_edit(
         workdir,
@@ -889,28 +974,38 @@ fn run_patch_fold_commit_to_commit(
         return Err(e);
     }
 
-    if let Err(e) = apply_and_amend(workdir, &selections, &selected_patch, &gitlinks, false) {
+    if let Err(e) = apply_and_amend(workdir, selections, &selected_patch, &gitlinks, false) {
         return Err(git::rebase_abort_then_cleanup(workdir, e, rollback));
     }
 
-    let new_target_hash = git::rev_parse(workdir, "HEAD")?;
+    // Still inside the paused rebase, so the abort comes first: `rollback_fold`
+    // resets hard, and doing that under a live rebase makes the mess worse.
+    let new_target_hash = match git::rev_parse(workdir, "HEAD") {
+        Ok(hash) => hash,
+        Err(e) => return Err(git::rebase_abort_then_cleanup(workdir, e, rollback)),
+    };
 
-    if let Err(e) = git::continue_rebase_expecting_edit(workdir, git::AfterStop::nothing()) {
+    // The source replays again here, tracked by TRACK_BRANCH: dropping it as
+    // empty would slide that ref down onto the commit below.
+    if let Err(e) =
+        git::continue_rebase_expecting_edit(workdir, git::AfterStop::nothing().protecting(&protect))
+    {
         rollback();
         return Err(e);
     }
 
+    // Both phases are committed by now, so this reads the result rather than
+    // undoing it — but the index is still the one `save_and_unstage_staged`
+    // emptied, and it goes back whichever way this ends.
+    let tracked = git::rev_parse(workdir, TRACK_BRANCH);
+    let _ = git::branch_delete(workdir, TRACK_BRANCH);
+    let new_source_hash = tracked.inspect_err(|_| {
+        let _ = git::restore_staged_patch(workdir, &saved_staged);
+    })?;
+
     git::restore_staged_patch(workdir, &saved_staged)?;
 
-    msg::success(&format!(
-        "Moved hunk(s) from `{}` (now `{}`) into `{}` (now `{}`)",
-        git::short_hash(source_hash),
-        git::short_hash(&new_source_hash),
-        git::short_hash(target_hash),
-        git::short_hash(&new_target_hash)
-    ));
-
-    Ok(())
+    Ok((new_source_hash, new_target_hash))
 }
 
 /// Pick hunks from `commit_hash` to uncommit back into the working tree.
@@ -1379,11 +1474,10 @@ fn squash_fixup_into_commit(
     // Track target commit through the rebase via a temp branch.
     // The branch must exist before the rebase AND have an update-ref
     // line in the todo so git keeps it in sync.
-    git::branch_force_create(workdir, TRACK_BRANCH, &commit_hash)?;
-    graph.track_commit(target_oid, TRACK_BRANCH);
+    track_through_rebase(&mut graph, workdir, target_oid)?;
 
     let fold_ctx = serde_json::to_value(FoldVariant::FilesIntoCommit {
-        original_commit_hash: commit_hash,
+        original_commit_hash: commit_hash.clone(),
         files_count: files.len(),
         saved_staged: saved_staged.to_string(),
     })?;
@@ -1401,11 +1495,13 @@ fn squash_fixup_into_commit(
             ..Default::default()
         },
         context: fold_ctx,
+        protect: vec![commit_hash],
     };
     transaction::save(git_dir, &loom_state)?;
 
     let todo = graph.to_todo();
-    match weave::run_rebase(workdir, Some(&graph.base_oid.to_string()), &todo)? {
+    let base = graph.base_oid.to_string();
+    match weave::run_rebase_protecting(workdir, Some(&base), &todo, &loom_state.protect)? {
         RebaseOutcome::Completed => Ok(FixupOutcome::Rebased),
         RebaseOutcome::Paused => {
             transaction::warn_paused_at_edit(Some(COMMAND));
@@ -1437,8 +1533,7 @@ fn fold_commit_into_commit(repo: &Repository, source_hash: &str, target_hash: &s
     graph.fixup_commit(source_oid, target_oid)?;
 
     // Track target commit through the rebase via a temp branch.
-    git::branch_force_create(workdir, TRACK_BRANCH, target_hash)?;
-    graph.track_commit(target_oid, TRACK_BRANCH);
+    track_through_rebase(&mut graph, workdir, target_oid)?;
 
     let git_dir = repo.path().to_path_buf();
     let fold_ctx = serde_json::to_value(FoldVariant::CommitIntoCommit {
@@ -1449,14 +1544,21 @@ fn fold_commit_into_commit(repo: &Repository, source_hash: &str, target_hash: &s
         command: COMMAND.to_string(),
         rollback: Rollback {
             delete_branches: vec![TRACK_BRANCH.to_string()],
+            // The rebase autostashes, and the abort replays that into the
+            // working tree only — staged changes would come back unstaged.
+            saved_staged_patch: git::diff_cached(workdir)?,
             ..Default::default()
         },
         context: fold_ctx,
+        protect: vec![target_hash.to_string()],
     };
     transaction::save(&git_dir, &loom_state)?;
 
     let todo = graph.to_todo();
-    match weave::run_rebase(workdir, Some(&graph.base_oid.to_string()), &todo)? {
+    let base = graph.base_oid.to_string();
+    let outcome = weave::run_rebase_protecting(workdir, Some(&base), &todo, &loom_state.protect)
+        .map_err(|e| transaction::roll_back_failed_rebase(workdir, &git_dir, &loom_state, e))?;
+    match outcome {
         RebaseOutcome::Completed => {
             transaction::delete(&git_dir)?;
             let new_hash = git::rev_parse(workdir, TRACK_BRANCH)?;
@@ -1507,12 +1609,16 @@ fn fold_commit_to_branch(repo: &Repository, commit_hash: &str, branch_name: &str
             ..Default::default()
         },
         context: ctx,
+        // `branch_name` is read back for the success message, so it has to
+        // still name the moved commit rather than the tip it landed on.
+        protect: vec![commit_hash.to_string()],
     };
     transaction::save(&git_dir, &state)?;
 
     let todo = graph.to_todo();
-    let outcome = weave::run_rebase(workdir, Some(&graph.base_oid.to_string()), &todo)
-        .map_err(|e| transaction::discard_state_after(workdir, &git_dir, e))?;
+    let base = graph.base_oid.to_string();
+    let outcome = weave::run_rebase_protecting(workdir, Some(&base), &todo, &state.protect)
+        .map_err(|e| transaction::roll_back_failed_rebase(workdir, &git_dir, &state, e))?;
     match outcome {
         RebaseOutcome::Completed => {
             transaction::delete(&git_dir)?;
@@ -1550,9 +1656,9 @@ fn report_moved(commit_hash: &str, branch_name: &str, new_hash: &str, parked: &[
 /// Move one or more commits to the tip of a branch using Weave.
 ///
 /// Commits are appended in the order given, so callers that care about the
-/// resulting history order should pass them oldest-first. Returns the rebase
-/// outcome and the branches the move left empty — callers build and save
-/// their own `LoomState`.
+/// resulting history order should pass them oldest-first, as full object names
+/// (see [`weave::run_rebase_protecting`]). Returns the rebase outcome and the
+/// branches the move left empty — callers build and save their own `LoomState`.
 pub fn move_commits_to_branch(
     repo: &Repository,
     commit_hashes: &[String],
@@ -1561,7 +1667,10 @@ pub fn move_commits_to_branch(
     let workdir = repo::require_workdir(repo, COMMAND)?;
     let (graph, parked) = plan_move(repo, commit_hashes, branch_name)?;
     let todo = graph.to_todo();
-    let outcome = weave::run_rebase(workdir, Some(&graph.base_oid.to_string()), &todo)?;
+    // Callers name the result by reading `branch_name` back, and report how
+    // many commits moved: a replay dropped as empty would make both wrong.
+    let base = graph.base_oid.to_string();
+    let outcome = weave::run_rebase_protecting(workdir, Some(&base), &todo, commit_hashes)?;
     Ok((outcome, parked))
 }
 
@@ -1959,7 +2068,14 @@ fn fold_commit_file_to_commit(
         // it will be tracked through phase 2 via a temp branch.
         let phase1_source_hash = git::rev_parse(workdir, "HEAD")?;
 
-        if let Err(e) = git::continue_rebase_expecting_edit(workdir, git::AfterStop::nothing()) {
+        // The source replays during this continue and again in phase 2, where
+        // TRACK_BRANCH follows it; dropping it as empty would leave the hash
+        // reported at the end naming someone else's commit.
+        let protect = [phase1_source_hash.clone()];
+        if let Err(e) = git::continue_rebase_expecting_edit(
+            workdir,
+            git::AfterStop::nothing().protecting(&protect),
+        ) {
             let _ = git::branch_delete(workdir, TRACK_BRANCH);
             return Err(e);
         }
@@ -1977,8 +2093,10 @@ fn fold_commit_file_to_commit(
         // Track source through phase 2 — it will be rewritten when the
         // graph is replayed from base_oid.
         let phase1_source_oid = git2::Oid::from_str(&phase1_source_hash)?;
-        git::branch_force_create(workdir, TRACK_BRANCH, &phase1_source_hash)?;
-        graph2.track_commit(phase1_source_oid, TRACK_BRANCH);
+        if let Err(e) = track_through_rebase(&mut graph2, workdir, phase1_source_oid) {
+            rollback();
+            return Err(e);
+        }
 
         let todo2 = graph2.to_todo();
 
@@ -1999,10 +2117,6 @@ fn fold_commit_file_to_commit(
 
         new_target_hash = git::rev_parse(workdir, "HEAD")?;
 
-        // Phase 1's source replays during this continue, tracked by
-        // TRACK_BRANCH: dropping it as empty would slide that ref down onto
-        // the commit below and report it as the moved one.
-        let protect = [phase1_source_hash.clone()];
         if let Err(e) = git::continue_rebase_expecting_edit(
             workdir,
             git::AfterStop::nothing().protecting(&protect),
@@ -2125,6 +2239,7 @@ fn fold_commit_to_unstaged(repo: &Repository, commit_hash: &str) -> Result<()> {
             command: COMMAND.to_string(),
             rollback: Rollback::default(),
             context: fold_ctx,
+            protect: Vec::new(),
         };
         transaction::save(&git_dir, &loom_state)?;
 

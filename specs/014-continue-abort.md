@@ -46,11 +46,14 @@ The state file contains:
 
 - `command`: The name of the interrupted command (e.g., `"update"`, `"commit"`)
 - `rollback`: Saved references and patches for abort recovery:
-  - `saved_head`: HEAD OID before the operation started
-  - `saved_refs`: Snapshot of all branch ref OIDs before the operation
+  - `reset_mixed_to` / `reset_hard_to`: OID to reset to, when git's own abort
+    does not go back far enough
   - `delete_branches`: Branch names created during this operation (to delete on abort)
-  - `saved_staged_patch`: Staged diff saved aside during the operation
+  - `saved_staged_patch`: Index to restore, as a HEAD-to-index diff
   - `saved_worktree_patch`: Full working-tree diff saved before the rebase
+- `protect`: Commits the resumed rebase MUST NOT drop as empty (Spec 004). A
+  `run_rebase_protecting` caller that can pause MUST record them here, or
+  `loom continue` replays without the protection the command started with.
 - `context`: Command-specific resume data (serialized as JSON)
 
 The `.git/loom/` directory is created lazily when state is first saved.
@@ -200,6 +203,11 @@ loom continue
    - Runs `git rebase --continue`.
    - If `--continue` encounters another conflict: stays paused, keeps the state
      file, reports that the operation is still paused, exits successfully.
+   - If it halts on a commit in `protect` that replayed empty, that is not a
+     pause and not the user's to resolve: the rebase is aborted, the rollback
+     is applied, the state file goes, and the refusal is reported as an error.
+     Where the rollback takes that commit out of reach, the message MUST NOT
+     offer `loom drop` for it.
    - If `--continue` succeeds: moves to dispatch.
 3. If no rebase is in progress: assumes the user already ran `git rebase
    --continue` manually and moves to dispatch.
@@ -230,6 +238,12 @@ loom abort
    The message says so rather than blaming git — the abort already succeeded.
 4. Deletes the state file.
 5. Reports success.
+
+A command whose own rebase fails undoes itself the same way and removes its
+state, so nothing later reports a paused operation. The exception is a rebase
+still in progress — a failed abort, or the refusal above declining to reset over
+uncommitted work: the rollback would make that worse, so both stay for
+`loom abort`.
 
 The same rule holds outside `loom abort`. Wherever a command aborts its own
 rebase and then cleans up after itself — deleting a temp branch, resetting
@@ -342,12 +356,17 @@ commit info, and proposes removing gone-upstream branches.
 ```json
 {
   "branch_name": "<target feature branch name>",
-  "saved_staged_patch": "<patch content>"
+  "saved_staged": "<patch content>"
 }
 ```
 
-After continue: restores pre-existing staged changes, prints the success
-message with the new commit hash on the target branch.
+After continue: restores the staged work set aside for this commit, prints the
+success message with the new commit hash on the target branch. `saved_staged`
+is absent in a state file written before the field existed, where the rollback
+holds that same patch.
+
+The rollback's `saved_staged_patch` is a different snapshot: the whole index as
+the user left it, which the mixed reset restores when the commit is undone.
 
 ### `absorb` context
 
@@ -424,6 +443,11 @@ via the spinner error indicator and guidance message.
 The state file is deleted only after `after_continue` succeeds. If
 `after_continue` itself fails (e.g., a patch restore error), the state file
 remains and the user can retry `loom continue`.
+
+The exception is a refusal that already ended the rebase — a protected commit
+that replayed empty. There is nothing left to continue, so the undo is finished
+on the spot and the state goes with it; kept, it would report a paused
+operation to every later command, including the one the refusal suggests.
 
 ### Rollback Restores Pre-Existing State
 

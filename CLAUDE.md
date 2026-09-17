@@ -63,13 +63,22 @@ branches, and autostash), then `Rollback::apply_abort()` applies populated field
 | --- | --- |
 | `reset_mixed_to` | mixed reset; `commit` |
 | `reset_hard_to` | hard reset to pre-fixup HEAD; `absorb` |
-| `delete_branches` | remove temp refs; `commit`, fold files/commit |
-| `saved_staged_patch` | restore index; `commit`, `absorb`, fold files |
+| `delete_branches` | remove temp refs; `commit`, fold files/commit/relative |
+| `saved_staged_patch` | restore index; `commit`, `absorb`, `swap`, fold files/commit/branch/relative |
 | `saved_worktree_patch` | restore worktree; `absorb` |
+
+The index comes back unstaged otherwise: `git rebase --abort` replays its
+autostash into the working tree only. `commit` saves the whole pre-commit index
+here, because its reset undoes the commit as well; the subset it set aside for
+the success path lives in `CommitContext` (Spec 014).
 
 Every new resumable `weave::run_rebase` caller must populate `Rollback` before
 saving `LoomState` and register in `transaction::dispatch_after_continue`.
 There is no abort dispatcher; `Rollback::apply_abort()` owns cleanup.
+
+A `weave::run_rebase_protecting` caller that can pause must also record its
+protected commits in `LoomState.protect`, as full object names; `loom continue`
+replays without them otherwise (Spec 004).
 
 Before rebase, `weave::run_rebase` must reject every moved branch checked out
 in another non-prunable worktree (see `git/git_worktree.rs`, Spec 004), because
