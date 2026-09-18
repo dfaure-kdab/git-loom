@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 /// Amend the current commit, optionally replacing its message
 /// (`git commit --quiet --allow-empty --amend --only [-m msg]`). `--only` keeps
@@ -54,11 +54,49 @@ pub fn commit_amend_message_unverified(workdir: &Path, message: &str) -> Result<
 /// Amend the current commit, keeping its message and including staged changes
 /// (`git commit --amend --no-edit --allow-empty` — no `--only`, unlike
 /// [`commit_amend`]).
-pub fn commit_amend_no_edit(workdir: &Path) -> Result<()> {
-    super::run_git(
-        workdir,
-        &["commit", "--amend", "--no-edit", "--allow-empty"],
-    )
+///
+/// `opts` is what followed a `--` on a `fold` command line (Spec 021),
+/// forwarded verbatim and placed first, so git's last-wins parse keeps the
+/// `--amend` loom asked for. Captured whatever it holds, unlike
+/// [`commit_opts`]: loom reads the result below and rewrites on it, which an
+/// uncaptured run cannot report. Errs when git printed instead of committing,
+/// which it can do while exiting 0.
+pub fn commit_amend_no_edit(workdir: &Path, opts: &[&str]) -> Result<()> {
+    // Taken only with forwarded arguments: without one git cannot be told to
+    // do anything but amend.
+    let before = if opts.is_empty() {
+        None
+    } else {
+        Some((
+            super::rev_parse(workdir, "HEAD")?,
+            super::rev_parse(workdir, "HEAD^{tree}")?,
+        ))
+    };
+
+    let mut args = vec!["commit"];
+    args.extend(opts);
+    args.extend(["--amend", "--no-edit", "--allow-empty"]);
+    super::run_git(workdir, &args)?;
+
+    if let Some((head, tree)) = before {
+        // Every fold amend has something to commit, so HEAD's tree has to come
+        // out different; git printing instead of committing leaves it alone.
+        // Read from HEAD on both sides, so a `pre-commit` or `post-commit` hook
+        // that stages something of its own cannot fail an amend that happened.
+        if super::rev_parse(workdir, "HEAD^{tree}")? == tree {
+            bail!(
+                "`git commit --amend` left the commit as it was, so nothing was amended\n\
+                 Either an argument after `--` kept git from committing, or what was staged \
+                 already matched the commit"
+            );
+        }
+        // An amend replaces HEAD. Loom's own `--amend` comes last and wins, so
+        // this only catches a git that stops resolving the pair that way.
+        if super::rev_parse(workdir, "HEAD^").is_ok_and(|parent| parent == head) {
+            bail!("`git commit --amend` committed on top of the target instead of amending it");
+        }
+    }
+    Ok(())
 }
 
 /// True when `path` is gone from both the working tree and the index because
@@ -122,7 +160,23 @@ pub fn stage_path(workdir: &Path, path: &str) -> Result<()> {
 
 /// Create a commit with a message (`git commit -m <message>`).
 pub fn commit(workdir: &Path, message: &str) -> Result<()> {
-    commit_opts(workdir, Some(message), &[])
+    commit_captured(workdir, message, &[])
+}
+
+/// Create a commit with forwarded options, always captured — unlike
+/// [`commit_opts`], which steps back once the user forwards anything.
+///
+/// For a commit loom makes as one step of a longer operation (`fold`): loom
+/// reads the result itself and rewrites on it, and the rebase that follows
+/// needs the terminal.
+/// Unlike [`commit_amend_no_edit`] this does not check that git committed —
+/// what proves it differs per caller — so a caller that then rewrites history
+/// must check for itself (see `fold::committed_onto`).
+pub fn commit_captured(workdir: &Path, message: &str, opts: &[&str]) -> Result<()> {
+    let mut args = vec!["commit"];
+    args.extend(opts);
+    args.extend(["-m", message]);
+    super::run_git(workdir, &args)
 }
 
 /// Create a commit, with extra `git commit` options from the user.

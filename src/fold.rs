@@ -77,6 +77,7 @@ pub fn run(
     anchor: Option<Anchor>,
     hunks: HunkArgs,
     args: Vec<String>,
+    git_args: Vec<String>,
     theme: &graph::Theme,
 ) -> Result<()> {
     if args.is_empty() {
@@ -86,22 +87,26 @@ pub fn run(
         );
     }
 
+    let git_opts: Vec<&str> = git_args.iter().map(String::as_str).collect();
+
     let repo = repo::open_repo()?;
 
     if let Some(anchor) = anchor {
+        no_git_args(&git_opts, "moving commits next to another")?;
         return run_relative(&repo, &args, anchor);
     }
 
     if create {
+        no_git_args(&git_opts, "moving commits to a new branch")?;
         return run_create(&repo, &args);
     }
 
     if patch {
-        return run_patch_fold(&repo, &args, &hunks, theme);
+        return run_patch_fold(&repo, &args, &hunks, &git_opts, theme);
     }
 
     if args.len() == 1 {
-        return run_staged(&repo, &args[0]);
+        return run_staged(&repo, &args[0], &git_opts);
     }
 
     // Last argument is the target, everything else is a source
@@ -148,12 +153,14 @@ pub fn run(
 
     match classify(&resolved_sources, &resolved_target)? {
         FoldOp::FilesIntoCommit { files, commit } => {
-            fold_files_into_commit(&repo, &files, &commit, false)
+            fold_files_into_commit(&repo, &files, &commit, false, &git_opts)
         }
         FoldOp::CommitIntoCommit { source, target } => {
+            no_git_args(&git_opts, "folding a commit into another")?;
             fold_commit_into_commit(&repo, &source, &target)
         }
         FoldOp::CommitsToBranch { commits, branch } => {
+            no_git_args(&git_opts, "moving commits to a branch")?;
             // Order and de-duplicate first: the same commit named twice is one
             // commit, and it should keep the resumable single-commit path
             // rather than be treated as a stack because of a repeated argument.
@@ -166,16 +173,28 @@ pub fn run(
                 move_commits_and_report(workdir, &repo, &commits, &branch, None)
             }
         }
-        FoldOp::CommitToUnstaged { commit } => fold_commit_to_unstaged(&repo, &commit),
+        FoldOp::CommitToUnstaged { commit } => {
+            no_git_args(&git_opts, "uncommitting a commit")?;
+            fold_commit_to_unstaged(&repo, &commit)
+        }
         FoldOp::CommitFileToUnstaged { commit, path } => {
-            fold_commit_file_to_unstaged(&repo, &commit, &path)
+            fold_commit_file_to_unstaged(&repo, &commit, &path, &git_opts)
         }
         FoldOp::CommitFileToCommit {
             source_commit,
             path,
             target_commit,
-        } => fold_commit_file_to_commit(&repo, &source_commit, &path, &target_commit),
+        } => fold_commit_file_to_commit(&repo, &source_commit, &path, &target_commit, &git_opts),
     }
+}
+
+/// A fold that only rebases runs no `git commit`, so a forwarded argument has
+/// nothing to reach (Spec 021). `what` names the operation.
+fn no_git_args(git_opts: &[&str], what: &str) -> Result<()> {
+    if git_opts.is_empty() {
+        return Ok(());
+    }
+    bail!("{what} runs no `git commit`, so it takes no arguments after `--`");
 }
 
 /// Create a new branch and move the source commit(s) into it.
@@ -636,6 +655,7 @@ fn run_patch_fold(
     repo: &Repository,
     args: &[String],
     hunks: &HunkArgs,
+    git_opts: &[&str],
     theme: &graph::Theme,
 ) -> Result<()> {
     let workdir = repo::require_workdir(repo, COMMAND)?;
@@ -659,6 +679,7 @@ fn run_patch_fold(
                     workdir,
                     &source_hash,
                     &picker,
+                    git_opts,
                     theme,
                 );
             }
@@ -681,6 +702,7 @@ fn run_patch_fold(
                     &target_hash,
                     target_arg,
                     &picker,
+                    git_opts,
                     theme,
                 );
             }
@@ -738,7 +760,7 @@ fn run_patch_fold(
     if staged.is_empty() {
         bail!("No hunks selected");
     }
-    fold_files_into_commit(repo, &staged, &commit_hash, true)
+    fold_files_into_commit(repo, &staged, &commit_hash, true, git_opts)
 }
 
 /// The selected entries of this file that travel in the hunk patch. A
@@ -772,6 +794,7 @@ fn apply_and_amend_path(
     path: &str,
     gitlink: bool,
     reverse: bool,
+    git_opts: &[&str],
 ) -> Result<()> {
     match (gitlink, reverse) {
         (true, true) => git::apply_cached_patch_reverse(workdir, patch)?,
@@ -785,7 +808,7 @@ fn apply_and_amend_path(
             git::stage_path(workdir, path)?;
         }
     }
-    git::commit_amend_no_edit(workdir)
+    git::commit_amend_no_edit(workdir, git_opts)
 }
 
 /// How a whole-file pick has to be applied.
@@ -853,6 +876,7 @@ fn apply_and_amend(
     patch: &str,
     whole_files: &[PickedWholeFile],
     reverse: bool,
+    git_opts: &[&str],
 ) -> Result<()> {
     if !patch.is_empty() {
         if reverse {
@@ -884,7 +908,7 @@ fn apply_and_amend(
             git::stage_path(workdir, &file.path)?;
         }
     }
-    git::commit_amend_no_edit(workdir)
+    git::commit_amend_no_edit(workdir, git_opts)
 }
 
 fn is_whole_file(whole_files: &[PickedWholeFile], path: &str) -> bool {
@@ -961,6 +985,7 @@ fn build_movable_patch(
 ///
 /// Selected hunks are removed from source and added to target via a two-phase
 /// edit+continue rebase. Requires source to be newer than target.
+#[allow(clippy::too_many_arguments)]
 fn run_patch_fold_commit_to_commit(
     repo: &Repository,
     workdir: &Path,
@@ -968,6 +993,7 @@ fn run_patch_fold_commit_to_commit(
     target_hash: &str,
     target_arg: &str,
     picker: &Picker,
+    git_opts: &[&str],
     theme: &graph::Theme,
 ) -> Result<()> {
     let source_oid = git2::Oid::from_str(source_hash)?;
@@ -990,6 +1016,7 @@ fn run_patch_fold_commit_to_commit(
         target_hash,
         target_arg,
         &selections,
+        git_opts,
     )?;
 
     msg::success(&format!(
@@ -1017,6 +1044,7 @@ fn fold_selected_hunks_to_commit(
     target_hash: &str,
     target_arg: &str,
     selections: &[FileEntry],
+    git_opts: &[&str],
 ) -> Result<(String, String)> {
     let source_oid = git2::Oid::from_str(source_hash)?;
 
@@ -1057,7 +1085,14 @@ fn fold_selected_hunks_to_commit(
         return Err(e);
     }
 
-    if let Err(e) = apply_and_amend(workdir, selections, &selected_patch, &whole_files, true) {
+    if let Err(e) = apply_and_amend(
+        workdir,
+        selections,
+        &selected_patch,
+        &whole_files,
+        true,
+        git_opts,
+    ) {
         // Outside the cleanup closure: a failed abort skips it, and there is no
         // `LoomState` yet for `loom abort` to find the patch in.
         let e = git::rebase_abort_then_cleanup(workdir, e, || {
@@ -1129,7 +1164,14 @@ fn fold_selected_hunks_to_commit(
         return Err(e);
     }
 
-    if let Err(e) = apply_and_amend(workdir, selections, &selected_patch, &whole_files, false) {
+    if let Err(e) = apply_and_amend(
+        workdir,
+        selections,
+        &selected_patch,
+        &whole_files,
+        false,
+        git_opts,
+    ) {
         return Err(git::rebase_abort_then_cleanup(workdir, e, rollback));
     }
 
@@ -1168,6 +1210,7 @@ fn run_patch_fold_commit_to_unstaged(
     workdir: &Path,
     commit_hash: &str,
     picker: &Picker,
+    git_opts: &[&str],
     theme: &graph::Theme,
 ) -> Result<()> {
     let selections = staging::run_commit_hunk_picker(workdir, commit_hash, &[], picker, theme)?
@@ -1200,7 +1243,14 @@ fn run_patch_fold_commit_to_unstaged(
         let pre_amend_hash = head_oid.to_string();
         // Same rollback as below: a failure part-way through leaves the hunks
         // reverse-applied in the working tree, and `saved_staged` unstaged.
-        if let Err(e) = apply_and_amend(workdir, &selections, &selected_patch, &whole_files, true) {
+        if let Err(e) = apply_and_amend(
+            workdir,
+            &selections,
+            &selected_patch,
+            &whole_files,
+            true,
+            git_opts,
+        ) {
             rollback_fold(workdir, &pre_amend_hash, None, &saved_worktree);
             return Err(e).context("Failed to remove hunks from the commit, operation rolled back");
         }
@@ -1230,7 +1280,14 @@ fn run_patch_fold_commit_to_unstaged(
             return Err(e);
         }
 
-        if let Err(e) = apply_and_amend(workdir, &selections, &selected_patch, &whole_files, true) {
+        if let Err(e) = apply_and_amend(
+            workdir,
+            &selections,
+            &selected_patch,
+            &whole_files,
+            true,
+            git_opts,
+        ) {
             // Outside the cleanup closure: a failed abort skips it, and there is
             // no `LoomState` yet for `loom abort` to find the patch in.
             let e = git::rebase_abort_then_cleanup(workdir, e, || {});
@@ -1288,7 +1345,7 @@ fn run_patch_fold_commit_to_unstaged(
 ///
 /// Single-argument form: `loom fold <target>`. The target must resolve to a
 /// commit. If nothing is staged, bails with the same message as `loom commit`.
-fn run_staged(repo: &Repository, target_arg: &str) -> Result<()> {
+fn run_staged(repo: &Repository, target_arg: &str, git_opts: &[&str]) -> Result<()> {
     let resolved = repo::resolve_arg(repo, target_arg, &[TargetKind::Commit])?;
     let commit_hash = match resolved {
         Target::Commit(hash) => hash,
@@ -1299,7 +1356,7 @@ fn run_staged(repo: &Repository, target_arg: &str) -> Result<()> {
     if staged.is_empty() {
         bail!("Nothing to commit");
     }
-    fold_files_into_commit(repo, &staged, &commit_hash, true)
+    fold_files_into_commit(repo, &staged, &commit_hash, true, git_opts)
 }
 
 #[derive(Debug)]
@@ -1480,6 +1537,7 @@ fn fold_files_into_commit(
     files: &[String],
     commit_hash: &str,
     skip_staging: bool,
+    git_opts: &[&str],
 ) -> Result<()> {
     let workdir = repo::require_workdir(repo, COMMAND)?;
 
@@ -1505,6 +1563,10 @@ fn fold_files_into_commit(
 
     let file_refs: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
 
+    // What a rollback has to take back out of the index, as opposed to what the
+    // user staged themselves.
+    let staged_by_loom: &[&str] = if skip_staging { &[] } else { &file_refs };
+
     // Unstage pre-existing staged files outside the target list, so they do
     // not end up in this commit/amend.
     let saved_staged = staging::save_and_unstage_other_staged(repo, workdir, &file_refs)?;
@@ -1515,11 +1577,11 @@ fn fold_files_into_commit(
         if !skip_staging {
             git::stage_files(workdir, &file_refs)?;
         }
-        if let Err(e) = git::commit_amend_no_edit(workdir) {
-            if !skip_staging {
-                let _ = git::unstage_files(workdir, &file_refs);
-            }
-            git::restore_staged_patch(workdir, &saved_staged);
+        if let Err(e) = git::commit_amend_no_edit(workdir, git_opts) {
+            // An amend that got as far as replacing HEAD and then failed leaves
+            // it on a commit the user never asked for, so this takes HEAD back
+            // too.
+            undo_commit_attempt(workdir, head_oid, staged_by_loom, &saved_staged);
             return Err(e);
         }
         git::restore_staged_patch(workdir, &saved_staged);
@@ -1536,12 +1598,34 @@ fn fold_files_into_commit(
         if !skip_staging {
             git::stage_files(workdir, &file_refs)?;
         }
-        if let Err(e) = git::commit(workdir, &message) {
-            if !skip_staging {
-                let _ = git::unstage_files(workdir, &file_refs);
-            }
-            git::restore_staged_patch(workdir, &saved_staged);
+        if let Err(e) = git::commit_captured(workdir, &message, git_opts) {
+            undo_commit_attempt(workdir, head_oid, staged_by_loom, &saved_staged);
             return Err(e);
+        }
+
+        // Data safety: a forwarded argument git takes but loom does not know
+        // can leave no commit behind, or amend HEAD in place. The squash below
+        // would then feed the user's own HEAD commit into the target and lose
+        // it, so check what git actually did before anything is rewritten.
+        if !committed_onto(workdir, head_oid) {
+            undo_commit_attempt(workdir, head_oid, staged_by_loom, &saved_staged);
+            let blame = if git_opts.is_empty() {
+                ""
+            } else {
+                "\nAn argument after `--` stopped it from committing"
+            };
+            bail!("`git commit` left no new commit on HEAD, so nothing was folded{blame}");
+        }
+        // The parent check alone accepts a child that holds nothing: `--only`
+        // with no pathspec commits none of the index, and `--allow-empty` lets
+        // the result through. The squash would then rewrite the target with
+        // nothing in it and report the fold as done.
+        if !git_opts.is_empty() && committed_the_same_tree(workdir, head_oid) {
+            undo_commit_attempt(workdir, head_oid, staged_by_loom, &saved_staged);
+            bail!(
+                "`git commit` made an empty `fixup!` commit, so nothing was folded\n\
+                 An argument after `--` kept the staged changes out of it"
+            );
         }
 
         // From here the repository carries a commit the user never asked for,
@@ -1593,6 +1677,62 @@ fn fold_files_into_commit(
     ));
 
     Ok(())
+}
+
+/// Whether HEAD is now a commit made on top of `parent`, which is what a `git
+/// commit` that ran leaves behind. False for a root HEAD, and for a `git
+/// commit` that committed nothing or amended `parent` away.
+fn committed_onto(workdir: &Path, parent: git2::Oid) -> bool {
+    git::rev_parse(workdir, "HEAD^").is_ok_and(|first| first == parent.to_string())
+}
+
+/// Whether the commit git just made holds the same tree as `parent`, which
+/// [`committed_onto`] accepts because it reads the parent alone. A git that
+/// cannot answer says yes, so the caller takes the commit back rather than
+/// rewriting history on top of it.
+fn committed_the_same_tree(workdir: &Path, parent: git2::Oid) -> bool {
+    match (
+        git::rev_parse(workdir, "HEAD^{tree}"),
+        git::rev_parse(workdir, &format!("{parent}^{{tree}}")),
+    ) {
+        (Ok(now), Ok(before)) => now == before,
+        _ => true,
+    }
+}
+
+/// Take back a `git commit` that did not do what fold asked: whatever it did to
+/// HEAD goes first, then loom's own staging, then the user's staged patch.
+/// `staged_by_loom` is empty when the caller did not stage anything itself.
+fn undo_commit_attempt(
+    workdir: &Path,
+    head_oid: git2::Oid,
+    staged_by_loom: &[&str],
+    saved_staged: &str,
+) {
+    // A `--amend` moved HEAD instead of adding to it; the reset puts the
+    // commit back and leaves what it held staged, for the two steps below. A
+    // hook that simply refused leaves HEAD where it was, and there is nothing
+    // to take back — an unreadable HEAD counts as moved, so the reset runs.
+    let head_moved = git::rev_parse(workdir, "HEAD").ok() != Some(head_oid.to_string());
+    if head_moved && let Err(e) = git::reset_soft(workdir, &head_oid.to_string()) {
+        // The commit git replaced is reachable by hash only, so name it.
+        msg::warn(&format!(
+            "could not put your commit back on HEAD: {e}\n\
+             `git reset --soft {head_oid}` restores it"
+        ));
+        // Restoring the index over the wrong HEAD would only make it worse.
+        git::save_or_warn(
+            workdir,
+            "unrestored-staged",
+            saved_staged,
+            git::Replay::Cached,
+        );
+        return;
+    }
+    if !staged_by_loom.is_empty() {
+        let _ = git::unstage_files(workdir, staged_by_loom);
+    }
+    git::restore_staged_patch(workdir, saved_staged);
 }
 
 /// How far [`squash_fixup_into_commit`] got.
@@ -2015,7 +2155,12 @@ fn keep_submodule_removals(workdir: &Path, commit: &str) -> Vec<String> {
 
 /// Uncommit a single file from a commit: its changes leave the commit and land
 /// in the working tree as unstaged modifications.
-fn fold_commit_file_to_unstaged(repo: &Repository, commit_hash: &str, path: &str) -> Result<()> {
+fn fold_commit_file_to_unstaged(
+    repo: &Repository,
+    commit_hash: &str,
+    path: &str,
+    git_opts: &[&str],
+) -> Result<()> {
     let workdir = repo::require_workdir(repo, COMMAND)?;
 
     let head_oid = repo::head_oid(repo)?;
@@ -2045,7 +2190,7 @@ fn fold_commit_file_to_unstaged(repo: &Repository, commit_hash: &str, path: &str
         let saved_head = head_oid.to_string();
         // A failure part-way through leaves the file reverse-applied in the
         // working tree, so this rolls back like the re-apply below does.
-        if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, true) {
+        if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, true, git_opts) {
             rollback_fold(workdir, &saved_head, None, &saved_worktree);
             return Err(e).context("Failed to uncommit file, operation rolled back");
         }
@@ -2072,7 +2217,7 @@ fn fold_commit_file_to_unstaged(repo: &Repository, commit_hash: &str, path: &str
         )
         .inspect_err(|e| git::restore_or_park_after_abort(workdir, &saved_worktree.staged, e))?;
 
-        if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, true) {
+        if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, true, git_opts) {
             // Outside the cleanup closure: a failed abort skips it, and there
             // is no `LoomState` for `loom abort` to find the patch in.
             let e = git::rebase_abort_then_cleanup(workdir, e, || {});
@@ -2127,6 +2272,7 @@ fn fold_commit_file_to_commit(
     source_hash: &str,
     path: &str,
     target_hash: &str,
+    git_opts: &[&str],
 ) -> Result<()> {
     let workdir = repo::require_workdir(repo, COMMAND)?;
 
@@ -2191,7 +2337,7 @@ fn fold_commit_file_to_commit(
             return Err(e);
         }
 
-        if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, true) {
+        if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, true, git_opts) {
             // Outside the cleanup closure: a failed abort skips it, and there
             // is no `LoomState` for `loom abort` to find the patch in.
             let e = git::rebase_abort_then_cleanup(workdir, e, || {
@@ -2263,7 +2409,7 @@ fn fold_commit_file_to_commit(
             return Err(e);
         }
 
-        if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, false) {
+        if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, false, git_opts) {
             return Err(git::rebase_abort_then_cleanup(workdir, e, rollback));
         }
 
@@ -2310,7 +2456,7 @@ fn fold_commit_file_to_commit(
         )
         .inspect_err(|e| git::restore_or_park_after_abort(workdir, &saved_worktree.staged, e))?;
 
-        if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, true) {
+        if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, true, git_opts) {
             // Outside the cleanup closure: a failed abort skips it, and there
             // is no `LoomState` for `loom abort` to find the patch in.
             let e = git::rebase_abort_then_cleanup(workdir, e, || {});
@@ -2337,7 +2483,7 @@ fn fold_commit_file_to_commit(
             }));
         }
 
-        if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, false) {
+        if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, false, git_opts) {
             return Err(git::rebase_abort_then_cleanup(workdir, e, || {
                 rollback_fold(workdir, &saved_head, Some(&saved_refs), &saved_worktree);
             }));

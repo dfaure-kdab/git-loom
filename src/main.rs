@@ -247,6 +247,9 @@ enum Command {
         /// Source(s) and target: files, commits, or branches (last arg is the target, unless --above/--below names it)
         #[arg(required = true, num_args = 1..)]
         args: Vec<String>,
+        /// Arguments forwarded verbatim to the `git commit` fold runs (everything after `--`)
+        #[arg(last = true, num_args = 0.., allow_hyphen_values = true, value_name = "GIT_ARG")]
+        git_args: Vec<String>,
     },
     /// Absorb working tree changes into the commits that introduced them
     Absorb {
@@ -665,6 +668,7 @@ fn main() {
             hunks,
             hunks_from,
             args,
+            git_args,
         }) => {
             let anchor = above
                 .map(fold::Anchor::Above)
@@ -675,6 +679,7 @@ fn main() {
                 anchor,
                 HunkArgs::new(hunks, hunks_from),
                 args,
+                git_args,
                 &theme,
             )
         }

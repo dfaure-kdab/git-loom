@@ -28,6 +28,47 @@ When only a target is given, currently staged files are folded into the target c
 | `--above <commit>` | Move the source commit(s) directly above (newer than) this commit. |
 | `--below <commit>` | Move the source commit(s) directly below (older than) this commit. |
 
+### Git Options
+
+The forms that commit take a `--` separator — see
+[Passing Options to Git](README.md#passing-options-to-git):
+
+```bash
+git loom fold src/auth.rs ab -- --no-verify
+git loom fold -p ab -- --no-verify
+```
+
+They reach the amend, or the `fixup!` commit loom makes for a non-HEAD target —
+the two places your commit hooks run. The rebase that rewrites the rest runs no
+hooks, so a fold that moves whole commits around (fixup, move, uncommit a
+commit, `--create`, `--above`/`--below`) takes no arguments after `--` and says
+so.
+
+Loom's own arguments go last, so a boolean git resolves last-wins keeps the
+value loom asked for: a forwarded `--no-amend` or `--edit` has no effect.
+
+Everything else reaches git as written, gaps included, because `--` is for
+someone who knows what they are asking git to do:
+
+- a message source — `-m`, `-F`, `-c`/`-C`, `--fixup`, `--squash` — rewords
+  every commit loom makes, which for a HEAD target is the target itself, and on
+  a move between two commits is *both* of them; use [reword](reword.md)
+  instead;
+- a pathspec restricts the commit and brings `--only` semantics with it, so git
+  commits the working tree's copy of that path rather than what is staged;
+- `-a` and `-i` sweep in tracked changes you did not name, and a fold into an
+  older commit buries them there. That includes your *own staged* files: loom
+  moves them out of the index for the duration and leaves them in the working
+  tree, which is where `-a` finds them;
+- a second `--` becomes a pathspec and takes loom's own arguments with it, so
+  git fails on them.
+
+One thing loom does not leave to you: `--dry-run` and the status formats make
+git print without committing at all, which would leave a fold rewriting history
+around a commit that was never made. Loom checks what git actually did and
+takes the whole attempt back — HEAD, its own staging, and your other staged
+files — rather than going on.
+
 ## Type Dispatch
 
 The action depends on the types of the arguments, detected automatically:
