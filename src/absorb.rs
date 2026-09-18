@@ -410,7 +410,7 @@ fn rollback_pre_rebase(workdir: &Path, state: &PreRebaseState<'_>) {
     if !state.saved_worktree.is_empty()
         && let Err(e) = git::apply_patch(workdir, state.saved_worktree)
     {
-        eprintln!("Warning: could not restore working tree changes: {}", e);
+        msg::warn(&format!("could not restore working tree changes: {e}"));
     }
 }
 
@@ -446,7 +446,7 @@ fn post_absorb(
     if let Some(patch) = skipped_patch
         && let Err(e) = git::apply_patch(workdir, patch)
     {
-        eprintln!("Warning: could not re-apply skipped changes: {}", e);
+        msg::warn(&format!("could not re-apply skipped changes: {e}"));
     }
 
     msg::success(&format!(
