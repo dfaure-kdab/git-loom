@@ -441,7 +441,7 @@ fn post_absorb(
     num_files: usize,
     num_commits: usize,
 ) -> Result<()> {
-    git::restore_staged_patch(workdir, saved_staged)?;
+    git::restore_staged_patch(workdir, saved_staged);
 
     if let Some(patch) = skipped_patch
         && let Err(e) = git::apply_patch(workdir, patch)

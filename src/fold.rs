@@ -1020,14 +1020,14 @@ fn fold_selected_hunks_to_commit(
         &[target_hash],
     ) {
         let _ = git::branch_delete(workdir, TRACK_BRANCH);
-        let _ = git::restore_staged_patch(workdir, &saved_staged);
+        git::restore_staged_patch(workdir, &saved_staged);
         return Err(e);
     }
 
     if let Err(e) = apply_and_amend(workdir, selections, &selected_patch, &whole_files, true) {
         return Err(git::rebase_abort_then_cleanup(workdir, e, || {
             let _ = git::branch_delete(workdir, TRACK_BRANCH);
-            let _ = git::restore_staged_patch(workdir, &saved_staged);
+            git::restore_staged_patch(workdir, &saved_staged);
         }));
     }
 
@@ -1040,7 +1040,7 @@ fn fold_selected_hunks_to_commit(
         git::continue_rebase_expecting_edit(workdir, git::AfterStop::nothing().protecting(&protect))
     {
         let _ = git::branch_delete(workdir, TRACK_BRANCH);
-        let _ = git::restore_staged_patch(workdir, &saved_staged);
+        git::restore_staged_patch(workdir, &saved_staged);
         return Err(e);
     }
 
@@ -1112,10 +1112,10 @@ fn fold_selected_hunks_to_commit(
     let tracked = git::rev_parse(workdir, TRACK_BRANCH);
     let _ = git::branch_delete(workdir, TRACK_BRANCH);
     let new_source_hash = tracked.inspect_err(|_| {
-        let _ = git::restore_staged_patch(workdir, &saved_staged);
+        git::restore_staged_patch(workdir, &saved_staged);
     })?;
 
-    git::restore_staged_patch(workdir, &saved_staged)?;
+    git::restore_staged_patch(workdir, &saved_staged);
 
     Ok((new_source_hash, new_target_hash))
 }
@@ -1185,13 +1185,13 @@ fn run_patch_fold_commit_to_unstaged(
             target_oid,
             &[],
         ) {
-            let _ = git::restore_staged_patch(workdir, &saved_staged);
+            git::restore_staged_patch(workdir, &saved_staged);
             return Err(e);
         }
 
         if let Err(e) = apply_and_amend(workdir, &selections, &selected_patch, &whole_files, true) {
             return Err(git::rebase_abort_then_cleanup(workdir, e, || {
-                let _ = git::restore_staged_patch(workdir, &saved_staged);
+                git::restore_staged_patch(workdir, &saved_staged);
             }));
         }
 
@@ -1209,7 +1209,7 @@ fn run_patch_fold_commit_to_unstaged(
         }
     }
 
-    git::restore_staged_patch(workdir, &saved_staged)?;
+    git::restore_staged_patch(workdir, &saved_staged);
 
     let mut staged: Vec<String> = whole_files
         .iter()
@@ -1471,10 +1471,10 @@ fn fold_files_into_commit(
             if !skip_staging {
                 let _ = git::unstage_files(workdir, &file_refs);
             }
-            let _ = git::restore_staged_patch(workdir, &saved_staged);
+            git::restore_staged_patch(workdir, &saved_staged);
             return Err(e);
         }
-        git::restore_staged_patch(workdir, &saved_staged)?;
+        git::restore_staged_patch(workdir, &saved_staged);
         new_hash = git::rev_parse(workdir, "HEAD")?;
     } else {
         // Create a fixup commit on HEAD with only the changed files, then
@@ -1492,7 +1492,7 @@ fn fold_files_into_commit(
             if !skip_staging {
                 let _ = git::unstage_files(workdir, &file_refs);
             }
-            let _ = git::restore_staged_patch(workdir, &saved_staged);
+            git::restore_staged_patch(workdir, &saved_staged);
             return Err(e);
         }
 
@@ -1512,7 +1512,7 @@ fn fold_files_into_commit(
             // integration branch behind its own feature branches.
             Ok(FixupOutcome::Rebased) => {
                 transaction::delete(&git_dir)?;
-                git::restore_staged_patch(workdir, &saved_staged)?;
+                git::restore_staged_patch(workdir, &saved_staged);
                 new_hash = git::rev_parse(workdir, TRACK_BRANCH)?;
                 let _ = git::branch_delete(workdir, TRACK_BRANCH);
             }
@@ -1529,7 +1529,7 @@ fn fold_files_into_commit(
                         // had these files modified, not staged.
                         let _ = git::unstage_files(workdir, &file_refs);
                     }
-                    let _ = git::restore_staged_patch(workdir, &saved_staged);
+                    git::restore_staged_patch(workdir, &saved_staged);
                     let _ = git::branch_delete(workdir, TRACK_BRANCH);
                     let _ = transaction::delete(&git_dir);
                 }));
@@ -2355,7 +2355,7 @@ pub fn after_continue(workdir: &Path, context: &serde_json::Value) -> Result<()>
         } => {
             let new_hash = git::rev_parse(workdir, TRACK_BRANCH)?;
             let _ = git::branch_delete(workdir, TRACK_BRANCH);
-            git::restore_staged_patch(workdir, &saved_staged)?;
+            git::restore_staged_patch(workdir, &saved_staged);
             msg::success(&format!(
                 "Folded {} file(s) into `{}` (now `{}`)",
                 files_count,
