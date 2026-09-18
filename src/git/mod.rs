@@ -9,7 +9,7 @@ pub mod git_worktree;
 pub use git_apply::{
     apply_cached_patch, apply_cached_patch_reverse, apply_patch, apply_patch_reverse,
     apply_patch_to_worktree, apply_patch_with_index, apply_patch_with_index_reverse,
-    restore_staged_patch,
+    restore_staged_patch, save_or_warn, save_patch_aside,
 };
 pub use git_branch::{
     branch_create, branch_delete, branch_force_create, branch_rename, branch_switch,

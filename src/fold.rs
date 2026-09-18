@@ -1,8 +1,7 @@
 use anyhow::{Context, Result, bail};
 use git2::{Repository, StatusOptions};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::core::diff;
 use crate::core::graph;
@@ -335,7 +334,7 @@ fn restage_after_abort(workdir: &Path, staged: &str) {
         git::reset_mixed(workdir, "HEAD").and_then(|()| git::apply_cached_patch(workdir, staged));
     if let Err(e) = restored {
         msg::warn(&format!("could not re-stage your staged changes: {e}"));
-        save_or_warn(workdir, "unrestored-staged", staged, true);
+        git::save_or_warn(workdir, "unrestored-staged", staged, true);
     }
 }
 
@@ -431,7 +430,7 @@ fn abort_and_restage(workdir: &Path, repo: &Repository, saved_staged: &str) -> a
 /// live rebase makes the mess worse.
 fn restage_or_park(workdir: &Path, git_dir: &Path, saved_staged: &str) {
     if git::rebase_is_in_progress(git_dir) {
-        save_or_warn(workdir, "unrestored-staged", saved_staged, true);
+        git::save_or_warn(workdir, "unrestored-staged", saved_staged, true);
     } else {
         restage_after_abort(workdir, saved_staged);
     }
@@ -1858,41 +1857,6 @@ impl WorktreeSnapshot {
     }
 }
 
-/// Write a patch that could not be applied under the git dir, so the user can
-/// still get at it. Returns where it landed, if it could be written at all.
-///
-/// This is the only copy left of that work, so it never writes over an earlier
-/// save: each file is created exclusively and the counter climbs until a free
-/// name turns up — a guarantee a clock reading cannot give. The git dir is
-/// asked for, never assumed: in a linked worktree or submodule `.git` is a
-/// file, and a hardcoded `.git/loom` would fail to be created in exactly the
-/// case this holds the last copy of the user's work.
-fn save_patch_aside(workdir: &Path, name: &str, patch: &str) -> Result<PathBuf> {
-    let dir = git::git_path(workdir, "loom")?;
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("Failed to create '{}'", dir.display()))?;
-
-    for attempt in 0..1000 {
-        let path = dir.join(format!("{name}-{attempt}.patch"));
-        match std::fs::File::create_new(&path) {
-            Ok(mut file) => {
-                return file
-                    .write_all(patch.as_bytes())
-                    .map(|()| path.clone())
-                    .with_context(|| format!("Failed to write '{}'", path.display()));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => {
-                return Err(e).with_context(|| format!("Failed to create '{}'", path.display()));
-            }
-        }
-    }
-    bail!(
-        "'{}' already holds 1000 saved {name} patches",
-        dir.display()
-    )
-}
-
 /// Undo a failed fold: history back to `saved_head`, then the user's own
 /// uncommitted changes back on top of it.
 ///
@@ -1916,8 +1880,8 @@ fn rollback_fold(
              History is NOT where it was — check `loom` before replaying anything",
             git::short_hash(saved_head)
         ));
-        save_or_warn(workdir, "unrestored", &saved_worktree.worktree, false);
-        save_or_warn(workdir, "unrestored-staged", &saved_worktree.staged, true);
+        git::save_or_warn(workdir, "unrestored", &saved_worktree.worktree, false);
+        git::save_or_warn(workdir, "unrestored-staged", &saved_worktree.staged, true);
         return;
     }
     if let Some(refs) = saved_refs
@@ -1929,37 +1893,13 @@ fn rollback_fold(
         && let Err(e) = git::apply_cached_patch(workdir, &saved_worktree.staged)
     {
         msg::warn(&format!("could not re-stage your staged changes: {e}"));
-        save_or_warn(workdir, "unrestored-staged", &saved_worktree.staged, true);
+        git::save_or_warn(workdir, "unrestored-staged", &saved_worktree.staged, true);
     }
     if !saved_worktree.worktree.is_empty()
         && let Err(e) = git::apply_patch(workdir, &saved_worktree.worktree)
     {
         msg::warn(&format!("could not restore your uncommitted changes: {e}"));
-        save_or_warn(workdir, "unrestored", &saved_worktree.worktree, false);
-    }
-}
-
-/// Park a patch the rollback could not replay, and say where it went and how to
-/// replay it by hand — or, if even that fails, that the autostash commit is now
-/// the only copy.
-///
-/// `cached` tells the two halves apart: the staged snapshot is a HEAD → index
-/// diff, so replaying it into the working tree instead would apply it twice
-/// over.
-fn save_or_warn(workdir: &Path, name: &str, patch: &str, cached: bool) {
-    if patch.is_empty() {
-        return;
-    }
-    let flag = if cached { " --cached" } else { "" };
-    match save_patch_aside(workdir, name, patch) {
-        Ok(path) => msg::warn(&format!(
-            "those changes are saved as a patch — replay them with `git apply{flag} {}`",
-            path.display()
-        )),
-        Err(e) => msg::warn(&format!(
-            "the patch of those changes could not be saved either ({e}) — the autostash \
-             commit that `git fsck --lost-found` lists is the last copy"
-        )),
+        git::save_or_warn(workdir, "unrestored", &saved_worktree.worktree, false);
     }
 }
 
@@ -2456,7 +2396,7 @@ pub fn after_continue(workdir: &Path, context: &serde_json::Value) -> Result<()>
                 // re-apply — usually because conflict resolution changed the surrounding
                 // context. Save it to a file so the user can recover it by hand.
                 let mut warning = format!("Could not re-apply changes to working directory: {e}");
-                match save_patch_aside(workdir, "unapplied", &diff) {
+                match git::save_patch_aside(workdir, "unapplied", &diff) {
                     Ok(path) => warning.push_str(&format!(
                         "\nThe diff has been saved — apply it with `git apply {}`",
                         path.display()

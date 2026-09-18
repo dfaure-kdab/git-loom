@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
@@ -220,6 +220,69 @@ pub fn restore_staged_patch(workdir: &Path, patch: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Write a patch that could not be applied under the git dir, so the user can
+/// still get at it. Returns where it landed, if it could be written at all.
+///
+/// This is the only copy left of that work, so it never writes over an earlier
+/// save: each file is created exclusively and the counter climbs until a free
+/// name turns up — a guarantee a clock reading cannot give. The git dir is
+/// asked for, never assumed: in a linked worktree or submodule `.git` is a
+/// file, and a hardcoded `.git/loom` would fail to be created in exactly the
+/// case this holds the last copy of the user's work.
+pub fn save_patch_aside(workdir: &Path, name: &str, patch: &str) -> Result<PathBuf> {
+    let dir = super::git_path(workdir, "loom")?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("Failed to create '{}'", dir.display()))?;
+
+    for attempt in 0..1000 {
+        let path = dir.join(format!("{name}-{attempt}.patch"));
+        match std::fs::File::create_new(&path) {
+            Ok(mut file) => {
+                return file
+                    .write_all(patch.as_bytes())
+                    .map(|()| path.clone())
+                    .with_context(|| format!("Failed to write '{}'", path.display()));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(e).with_context(|| format!("Failed to create '{}'", path.display()));
+            }
+        }
+    }
+    bail!(
+        "'{}' already holds 1000 saved {name} patches",
+        dir.display()
+    )
+}
+
+/// Park a patch that could not be replayed, and say where it went and how to
+/// replay it by hand — or, if even that fails, where the last copy still is.
+///
+/// That last line names the rebase autostash, which is not every caller's last
+/// copy: `rollback_fold` reaches here from an amend that never rebased. A
+/// caller that knows better calls [`save_patch_aside`] and words its own — as
+/// `fold`'s uncommit does, naming the dangling commit its diff came from.
+///
+/// `cached` tells the two halves apart: the staged snapshot is a HEAD → index
+/// diff, so replaying it into the working tree instead would apply it twice
+/// over.
+pub fn save_or_warn(workdir: &Path, name: &str, patch: &str, cached: bool) {
+    if patch.is_empty() {
+        return;
+    }
+    let flag = if cached { " --cached" } else { "" };
+    match save_patch_aside(workdir, name, patch) {
+        Ok(path) => crate::core::msg::warn(&format!(
+            "those changes are saved as a patch — replay them with `git apply{flag} {}`",
+            path.display()
+        )),
+        Err(e) => crate::core::msg::warn(&format!(
+            "the patch of those changes could not be saved either ({e}) — the autostash \
+             commit that `git fsck --lost-found` lists is the last copy"
+        )),
+    }
 }
 
 #[cfg(test)]
