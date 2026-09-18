@@ -83,7 +83,12 @@ impl Rollback {
         if !self.saved_worktree_patch.is_empty()
             && let Err(e) = git::apply_patch(workdir, &self.saved_worktree_patch)
         {
+            // Parked for the same reason as the staged half above: the state
+            // file holding this patch is deleted as soon as the abort reports
+            // success, so whatever a reset here did or did not take, nothing
+            // else keeps a copy.
             crate::core::msg::warn(&format!("could not re-apply working-tree changes: {e}"));
+            git::save_or_warn(workdir, "unrestored", &self.saved_worktree_patch, false);
         }
         Ok(())
     }
@@ -898,6 +903,58 @@ mod tests {
             pause_reason(&workdir, Some(&same)),
             PauseReason::Other,
             "an unchanged AUTO_MERGE must not be credited to rerere"
+        );
+    }
+
+    /// The abort deletes the state file holding this patch, and a reset has just
+    /// taken the working tree, so one that will not apply has to reach the user
+    /// as a file instead.
+    #[test]
+    fn an_abort_that_cannot_restage_parks_the_patch() {
+        let test_repo = crate::core::test_helpers::TestRepo::new();
+        test_repo.commit("A commit", "file1.txt");
+        let workdir = test_repo.workdir();
+
+        let rollback = Rollback {
+            reset_hard_to: test_repo.head_oid().to_string(),
+            // Nonsense as a patch: it cannot apply, whatever the index holds.
+            saved_staged_patch: "not a patch at all\n".to_string(),
+            ..Default::default()
+        };
+        rollback.apply_abort(&workdir).unwrap();
+
+        let parked = git::git_path(&workdir, "loom")
+            .unwrap()
+            .join("unrestored-staged-0.patch");
+        assert_eq!(
+            std::fs::read_to_string(&parked).unwrap(),
+            "not a patch at all\n",
+            "the state file is about to go, so this patch must not go with it"
+        );
+    }
+
+    /// The working-tree half of the same rollback: `reset_hard` took the files,
+    /// so its patch is the only copy of them too.
+    #[test]
+    fn an_abort_that_cannot_restore_the_worktree_parks_that_patch() {
+        let test_repo = crate::core::test_helpers::TestRepo::new();
+        test_repo.commit("A commit", "file1.txt");
+        let workdir = test_repo.workdir();
+
+        let rollback = Rollback {
+            reset_hard_to: test_repo.head_oid().to_string(),
+            saved_worktree_patch: "not a patch at all\n".to_string(),
+            ..Default::default()
+        };
+        rollback.apply_abort(&workdir).unwrap();
+
+        let parked = git::git_path(&workdir, "loom")
+            .unwrap()
+            .join("unrestored-0.patch");
+        assert_eq!(
+            std::fs::read_to_string(&parked).unwrap(),
+            "not a patch at all\n",
+            "the reset took these files and the state file is about to go"
         );
     }
 

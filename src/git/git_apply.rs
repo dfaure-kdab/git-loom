@@ -207,10 +207,13 @@ fn run_apply(
     Ok(())
 }
 
-/// Re-apply a previously saved staged patch, warning on failure.
+/// Re-apply a previously saved staged patch, parking it on failure.
 ///
-/// No-ops if `patch` is empty. The primary operation has already succeeded, so
-/// this is best-effort.
+/// No-ops if `patch` is empty. The primary operation has already succeeded or
+/// already failed for its own reason, so this is best-effort — but the patch is
+/// handed over rather than dropped: `loom abort` reaches here after a reset that
+/// took the working tree, and deletes the state file holding this patch as soon
+/// as it reports success.
 ///
 /// Nothing for a caller to `?` on: doing so would report this in place of
 /// whatever actually stopped the command.
@@ -221,6 +224,7 @@ pub fn restore_staged_patch(workdir: &Path, patch: &str) {
         msg::warn(&format!(
             "could not restore pre-existing staged changes: {e}"
         ));
+        save_or_warn(workdir, "unrestored-staged", patch, true);
     }
 }
 
@@ -278,10 +282,11 @@ pub fn save_patch_aside(workdir: &Path, name: &str, patch: &str) -> Result<PathB
 /// Park a patch that could not be replayed, and say where it went and how to
 /// replay it by hand — or, if even that fails, where the last copy still is.
 ///
-/// That last line names the rebase autostash, which is not every caller's last
-/// copy: `rollback_fold` reaches here from an amend that never rebased. A
-/// caller that knows better calls [`save_patch_aside`] and words its own — as
-/// `fold`'s uncommit does, naming the dangling commit its diff came from.
+/// The last-resort line names no copy at all, because callers do not share one:
+/// a rebase leaves an autostash, an amend never made one, `loom abort` has
+/// dropped the one it had, and worktree content was never a git object to find.
+/// A caller that can name something better calls [`save_patch_aside`] and words
+/// its own, as `fold`'s uncommit does.
 ///
 /// `cached` tells the two halves apart: the staged snapshot is a HEAD → index
 /// diff, so replaying it into the working tree instead would apply it twice
@@ -297,8 +302,7 @@ pub fn save_or_warn(workdir: &Path, name: &str, patch: &str, cached: bool) {
             path.display()
         )),
         Err(e) => msg::warn(&format!(
-            "the patch of those changes could not be saved either ({e}) — the autostash \
-             commit that `git fsck --lost-found` lists is the last copy"
+            "the patch of those changes could not be saved either ({e})"
         )),
     }
 }

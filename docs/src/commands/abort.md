@@ -53,9 +53,14 @@ running — rerun `loom abort` once the repository is free.
 A reset or a staged-patch restore in the rollback that follows behaves the same
 way: the state file stays, because it is the only record of what is left to
 undo, and the message names the half-applied rollback rather than git, which has
-finished its own abort by then. A temp branch that will not delete, or a
-working-tree patch that will not re-apply, only warns — the rollback carries on
-and the state file goes.
+finished its own abort by then. A temp branch that will not delete only warns —
+the rollback carries on and the state file goes.
+
+A saved patch that will not re-apply is written to `.git/loom/` instead, and the
+warning gives the `git apply` line that replays it. The state file is deleted
+once the abort reports success, so that file is what is left of those changes:
+loom never removes one, and they are yours to delete once you have replayed
+them.
 
 For that same reason, never delete `.git/loom/state.json` to get unstuck. Once
 it is gone, `loom abort` can only run git's own abort: a temp branch, a

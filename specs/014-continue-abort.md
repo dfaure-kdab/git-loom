@@ -233,9 +233,15 @@ loom abort
    - Re-applies `saved_staged_patch` (if non-empty)
    - Re-applies `saved_worktree_patch` (if non-empty)
 
-   If a step here fails, the state file stays as well, for the same reason: the
-   rollback is half-applied, and it is the only record of what is left to undo.
-   The message says so rather than blaming git — the abort already succeeded.
+   Only a reset can fail the abort. When one does the state file stays as well,
+   for the same reason: the rollback is half-applied, and it is the only record
+   of what is left to undo. The message says so rather than blaming git — the
+   abort already succeeded.
+
+   The other steps never fail it. A branch that will not delete is left behind,
+   and a patch that will not re-apply is parked as a file and named, so the
+   rollback reports success and the state file goes with it — which is why the
+   patch has to be parked rather than warned about.
 4. Deletes the state file.
 5. Reports success.
 
@@ -455,3 +461,8 @@ The rollback on `loom abort` restores all branch refs and staged/worktree
 patches to their state before the operation started. For `commit`, the
 working-tree changes are preserved via mixed reset (the commit content returns
 to the working directory as unstaged changes).
+
+A saved patch that will not re-apply is parked as a file and named, not dropped.
+It matters most on the abort path, where a reset may have taken the working tree
+with it and the state file holding the patch is deleted as soon as the abort
+reports success — but the rule holds wherever loom puts a saved patch back.
