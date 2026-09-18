@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 
+use crate::core::msg;
 use crate::trace as loom_trace;
 
 /// Apply a patch passed on stdin (`git apply`).
@@ -208,16 +209,15 @@ fn run_apply(
 
 /// Re-apply a previously saved staged patch, warning on failure.
 ///
-/// No-ops if `patch` is empty. On failure, emits a warning to stderr — the
-/// primary operation has already succeeded, so this is best-effort.
+/// No-ops if `patch` is empty. The primary operation has already succeeded, so
+/// this is best-effort.
 pub fn restore_staged_patch(workdir: &Path, patch: &str) -> Result<()> {
     if !patch.is_empty()
         && let Err(e) = apply_cached_patch(workdir, patch)
     {
-        eprintln!(
-            "Warning: could not restore pre-existing staged changes: {}",
-            e
-        );
+        msg::warn(&format!(
+            "could not restore pre-existing staged changes: {e}"
+        ));
     }
     Ok(())
 }
@@ -290,11 +290,11 @@ pub fn save_or_warn(workdir: &Path, name: &str, patch: &str, cached: bool) {
     }
     let flag = if cached { " --cached" } else { "" };
     match save_patch_aside(workdir, name, patch) {
-        Ok(path) => crate::core::msg::warn(&format!(
+        Ok(path) => msg::warn(&format!(
             "those changes are saved as a patch — replay them with `git apply{flag} {}`",
             path.display()
         )),
-        Err(e) => crate::core::msg::warn(&format!(
+        Err(e) => msg::warn(&format!(
             "the patch of those changes could not be saved either ({e}) — the autostash \
              commit that `git fsck --lost-found` lists is the last copy"
         )),
