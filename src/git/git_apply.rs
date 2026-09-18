@@ -235,15 +235,31 @@ pub fn save_patch_aside(workdir: &Path, name: &str, patch: &str) -> Result<PathB
     let dir = super::git_path(workdir, "loom")?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create '{}'", dir.display()))?;
+    // This directory is usually brand new, and its own entry is no more durable
+    // than the patch inside it would be, so it is synced through its parent.
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::File::open(parent).and_then(|d| d.sync_all());
+    }
 
     for attempt in 0..1000 {
         let path = dir.join(format!("{name}-{attempt}.patch"));
         match std::fs::File::create_new(&path) {
             Ok(mut file) => {
-                return file
+                // Sync the file, then the directory naming it: a freshly
+                // created entry is not durable until its directory is. Both
+                // are best effort — Windows refuses to open a directory.
+                let written = file
                     .write_all(patch.as_bytes())
-                    .map(|()| path.clone())
-                    .with_context(|| format!("Failed to write '{}'", path.display()));
+                    .and_then(|()| file.sync_all())
+                    .with_context(|| format!("Failed to save '{}'", path.display()));
+                if let Err(e) = written {
+                    // A corpse holding a name helps nobody, and the counter
+                    // below would step over that slot for good.
+                    let _ = std::fs::remove_file(&path);
+                    return Err(e);
+                }
+                let _ = std::fs::File::open(&dir).and_then(|d| d.sync_all());
+                return Ok(path);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
