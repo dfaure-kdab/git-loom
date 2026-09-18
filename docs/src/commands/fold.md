@@ -352,4 +352,5 @@ See [`continue`](continue.md) and [`abort`](abort.md) for details.
 
 - Must be in a git repository with a working tree
 - For short ID arguments: must have upstream tracking configured
-- All operations are atomic and automatically preserve uncommitted changes
+- All operations are atomic and automatically preserve uncommitted changes,
+  staged ones as staged

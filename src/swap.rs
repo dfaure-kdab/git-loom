@@ -45,8 +45,7 @@ fn swap_two_commits(repo: &Repository, hash_a: String, hash_b: String) -> Result
     let state = LoomState {
         command: "swap".to_string(),
         rollback: Rollback {
-            // The rebase autostashes, and the abort replays that into the
-            // working tree only — staged changes would come back unstaged.
+            // Restored whichever way the rebase ends (Spec 014).
             saved_staged_patch: git::diff_cached(workdir)?,
             ..Default::default()
         },
@@ -66,6 +65,7 @@ fn swap_two_commits(repo: &Repository, hash_a: String, hash_b: String) -> Result
         .map_err(|e| transaction::roll_back_failed_rebase(workdir, &git_dir, &state, e))?;
     match outcome {
         RebaseOutcome::Completed => {
+            git::restore_staged_after_rebase(workdir, &state.rollback.saved_staged_patch);
             transaction::delete(&git_dir)?;
             msg::success(&format!(
                 "Swapped commits `{}` and `{}`",
@@ -84,9 +84,14 @@ fn swap_two_commits(repo: &Repository, hash_a: String, hash_b: String) -> Result
 }
 
 /// Resume a `swap` operation after a conflict has been resolved.
-pub fn after_continue(_workdir: &Path, context: &serde_json::Value) -> Result<()> {
+pub fn after_continue(
+    workdir: &Path,
+    rollback: &Rollback,
+    context: &serde_json::Value,
+) -> Result<()> {
     let ctx: SwapContext =
         serde_json::from_value(context.clone()).context("Failed to parse swap resume context")?;
+    git::restore_staged_after_rebase(workdir, &rollback.saved_staged_patch);
     msg::success(&format!(
         "Swapped commits `{}` and `{}`",
         ctx.display_a, ctx.display_b

@@ -64,7 +64,7 @@ branches, and autostash), then `Rollback::apply_abort()` applies populated field
 | `reset_mixed_to` | mixed reset; `commit` |
 | `reset_hard_to` | hard reset to pre-fixup HEAD; `absorb` |
 | `delete_branches` | remove temp refs; `commit`, fold files/commit/relative |
-| `saved_staged_patch` | restore index; `commit`, `absorb`, `swap`, fold files/commit/branch/relative |
+| `saved_staged_patch` | restore index; `absorb`, `commit`, `drop`, `fold`, `reword`, `swap`, `update` |
 | `saved_worktree_patch` | restore worktree; `absorb` |
 
 The index comes back unstaged otherwise: `git rebase --abort` replays its
@@ -75,6 +75,15 @@ the success path lives in `CommitContext` (Spec 014).
 Every new resumable `weave::run_rebase` caller must populate `Rollback` before
 saving `LoomState` and register in `transaction::dispatch_after_continue`.
 There is no abort dispatcher; `Rollback::apply_abort()` owns cleanup.
+
+Every rebase autostashes, and that replay reaches the working tree only: a
+staged modification comes back unstaged on a rebase that completed just as it
+does on one that was aborted. So a caller must also put `saved_staged_patch`
+back on the paths `apply_abort()` never sees — the `RebaseOutcome::Completed`
+arm and its `after_continue` handler — through
+`git::restore_staged_after_rebase`, which applies three-way and never fails its
+caller. `weave::run_rebase_or_abort` does it for its own callers (Specs 004 and
+014).
 
 A `weave::run_rebase_protecting` caller that can pause must also record its
 protected commits in `LoomState.protect`, as full object names; `loom continue`

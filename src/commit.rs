@@ -239,7 +239,7 @@ pub fn after_continue(
 
 /// Post-rebase work: restore staged changes and print success message.
 fn post_commit(workdir: &Path, branch_name: &str, saved_staged: &str) -> Result<()> {
-    git::restore_staged_patch(workdir, saved_staged);
+    git::restore_staged_after_rebase(workdir, saved_staged);
 
     let new_hash = git::rev_parse(workdir, branch_name)?;
 

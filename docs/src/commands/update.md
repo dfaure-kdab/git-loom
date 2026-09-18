@@ -41,7 +41,7 @@ If an entire branch empties out after filtering, its section and merge entry are
 
 ### Rebase
 
-Replays local commits onto the updated upstream using a topology-aware weave model — ensuring new upstream commits land on the base line, not inside feature branch sections. Uncommitted working tree changes are automatically stashed and restored.
+Replays local commits onto the updated upstream using a topology-aware weave model — ensuring new upstream commits land on the base line, not inside feature branch sections. Uncommitted working tree changes are automatically stashed and restored, staged ones as staged.
 
 If the current branch has no weave topology (a plain tracked branch), loom falls back to a standard `git rebase --autostash --update-refs --rebase-merges`.
 

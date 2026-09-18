@@ -193,13 +193,13 @@ These operations pause on rebase conflict and save the listed `LoomState.context
 
 | Operation | Context |
 | --- | --- |
-| Files/current changes into commit | `op: "FilesIntoCommit"`; original hash, file count, saved staged patch |
+| Files/current changes into commit | `op: "FilesIntoCommit"`; original hash and file count |
 | Commit fixup | `op: "CommitIntoCommit"`; source and target hashes |
 | Single commit move | `op: "CommitToBranch"`; commit hash and branch name |
 | Commit to worktree | `op: "CommitToUnstaged"`; commit hash and captured diff |
 | Single commit next to a commit | `op: "CommitRelative"`; commit hash, target hash, `above` flag, parked branches |
 
-`loom continue` dispatches `after_continue`, removes `_loom-track`, and prints the operation's success message. `loom abort` restores original history, staged state, and working-tree state (Spec 014). The post-continue unapplied-patch exception is defined above.
+`loom continue` dispatches `after_continue`, removes `_loom-track`, restores pre-existing staged changes from `LoomState.rollback`, and prints the operation's success message. `loom abort` restores original history, staged state, and working-tree state (Spec 014). The post-continue unapplied-patch exception is defined above.
 
 Multiple moves (to a branch or next to a commit), all `-c` moves, all `-p` forms, and CommitFile move failures save no resumable state and auto-rollback as specified in their sections.
 

@@ -1318,3 +1318,78 @@ fn update_removes_its_state_when_the_rebase_never_starts() {
     );
     assert!(!crate::git::rebase_is_in_progress(test_repo.repo.path()));
 }
+
+/// Regression: the autostash replay unstages a staged *modification*, so an
+/// update that succeeded has to put the index back too.
+#[test]
+fn update_keeps_staging_on_success() {
+    let t = TestRepo::new_with_remote();
+    t.commit("Local", "local.txt");
+    t.add_remote_commits(&["Upstream"]);
+    t.write_file("local.txt", "staged edit\n");
+    t.write_file("brand-new.txt", "new\n");
+    t.stage_files(&["local.txt", "brand-new.txt"]);
+    let before = t.status_porcelain();
+
+    t.in_dir(|| crate::update::run(true)).unwrap();
+
+    assert_eq!(t.status_porcelain(), before);
+}
+
+/// `loom continue` finishes the rebase, so it owns the restore the `Completed`
+/// arm would have done.
+#[test]
+fn update_keeps_staging_across_continue() {
+    let t = TestRepo::new_with_remote();
+    t.write_file("shared.txt", "local\n");
+    t.stage_files(&["shared.txt"]);
+    t.commit_staged("Local");
+
+    // `add_remote_commits` reuses its parent's tree, so it can never conflict:
+    // write a real one, so replaying `Local` has something to collide with.
+    let remote = git2::Repository::open_bare(t.remote_path().unwrap()).unwrap();
+    let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+    let parent_oid = remote
+        .find_branch("main", git2::BranchType::Local)
+        .unwrap()
+        .get()
+        .target()
+        .unwrap();
+    let parent = remote.find_commit(parent_oid).unwrap();
+    let blob = remote.blob(b"upstream\n").unwrap();
+    let mut builder = remote.treebuilder(Some(&parent.tree().unwrap())).unwrap();
+    builder.insert("shared.txt", blob, 0o100644).unwrap();
+    let tree_oid = builder.write().unwrap();
+    let tree = remote.find_tree(tree_oid).unwrap();
+    remote
+        .commit(
+            Some("refs/heads/main"),
+            &sig,
+            &sig,
+            "Upstream",
+            &tree,
+            &[&parent],
+        )
+        .unwrap();
+
+    t.write_file("bystander.txt", "bystander\n");
+    t.stage_files(&["bystander.txt"]);
+    t.commit_staged("Bystander");
+    t.write_file("bystander.txt", "bystander\nstaged edit\n");
+    t.stage_files(&["bystander.txt"]);
+    let before = t.status_porcelain();
+
+    t.in_dir(|| crate::update::run(true)).unwrap();
+    assert!(
+        crate::git::rebase_is_in_progress(t.repo.path()),
+        "the upstream edit must conflict with the replayed commit"
+    );
+
+    t.write_file("shared.txt", "resolved\n");
+    t.stage_files(&["shared.txt"]);
+    let workdir = t.workdir();
+    crate::core::transaction::continue_cmd(&workdir, t.repo.path()).unwrap();
+
+    assert!(!crate::git::rebase_is_in_progress(t.repo.path()));
+    assert_eq!(t.status_porcelain(), before);
+}

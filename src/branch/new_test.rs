@@ -238,3 +238,24 @@ fn branch_inside_existing_branch_no_weave() {
         "HEAD should be unchanged when branching inside an existing side branch"
     );
 }
+
+/// `branch new` weaves through `run_rebase_or_abort`, which autostashes.
+#[test]
+fn branch_new_weaving_keeps_staging() {
+    let test_repo = TestRepo::new_with_remote();
+    test_repo.commit("A1", "a1.txt");
+    test_repo.commit("A2", "a2.txt");
+    let a2_oid = test_repo.head_oid();
+    test_repo.commit("A3", "a3.txt");
+
+    test_repo.write_file("a1.txt", "staged edit\n");
+    test_repo.write_file("brand-new.txt", "new\n");
+    test_repo.stage_files(&["a1.txt", "brand-new.txt"]);
+    let before = test_repo.status_porcelain();
+
+    test_repo
+        .in_dir(|| super::new::run(Some("feature-a".to_string()), Some(a2_oid.to_string())))
+        .unwrap();
+
+    assert_eq!(test_repo.status_porcelain(), before);
+}

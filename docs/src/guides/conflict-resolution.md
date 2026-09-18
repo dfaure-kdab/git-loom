@@ -99,6 +99,16 @@ operation, and restores any staged changes that were saved aside. For `commit`,
 the content you were committing comes back as unstaged working-tree changes so
 nothing is lost.
 
+Staging is restored whichever way the operation ends, not only on abort: a
+command that finishes, and `loom continue` after you resolve a conflict, both
+put the index back the way you left it.
+
+Two cases cannot be put back automatically, and neither loses anything. If git
+could not replay its own stash, your changes wait in `git stash list` and the
+conflict markers are yours to resolve. If your staged changes no longer apply
+over what the rewrite wrote, loom saves them as a patch under the git dir and
+prints the `git apply --cached --3way` line that replays them.
+
 ## Multiple Conflicts
 
 If your branch has several commits that conflict, each `loom continue` may

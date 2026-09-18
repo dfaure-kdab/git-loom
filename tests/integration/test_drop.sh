@@ -547,4 +547,22 @@ assert_no_state_file   "drop_abort_state_removed"
 assert_eq "$old_head" "$(head_hash)" "drop_abort_head_restored"
 assert_log_contains "C1" "drop_abort_c1_preserved"
 
+# ── STAGED MODIFICATION SURVIVES THE REBASE ──────────────────────────────────
+
+# A staged *new* file keeps its index entry through the autostash; a staged
+# modification does not, which is the shape the restore exists for.
+describe "drop keeps a staged modification staged"
+setup_repo_with_remote
+commit_file "Base" "base.txt"
+commit_file "Drop me" "drop-me.txt"
+drop_hash="$(head_hash)"
+commit_file "Keep" "keep.txt"
+printf 'base\nstaged edit\n' > "$WORK/base.txt"
+git -C "$WORK" add base.txt
+gl drop "$drop_hash" --yes >/dev/null
+assert_exit_ok $? "drop_staged_mod_ok"
+assert_contains "$(git -C "$WORK" status --porcelain)" "M  base.txt" \
+    "drop_staged_mod_still_staged"
+assert_contains "$(git -C "$WORK" show :base.txt)" "staged edit" "drop_staged_mod_content"
+
 pass

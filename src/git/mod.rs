@@ -7,8 +7,9 @@ pub mod git_rebase;
 pub mod git_worktree;
 
 pub use git_apply::{
-    apply_cached_patch, apply_cached_patch_reverse, apply_patch, apply_patch_reverse,
+    Replay, apply_cached_patch, apply_cached_patch_reverse, apply_patch, apply_patch_reverse,
     apply_patch_to_worktree, apply_patch_with_index, apply_patch_with_index_reverse,
+    restore_loom_unstaged_after_abort, restore_or_park_after_abort, restore_staged_after_rebase,
     restore_staged_patch, save_or_warn, save_patch_aside,
 };
 pub use git_branch::{
@@ -34,7 +35,7 @@ pub use git_rebase::{
     AfterStop, REPLAYS_EMPTY, RebaseOutcome, abort_after_failure, auto_merge_id,
     before_rebase_starts, continue_rebase, continue_rebase_expecting_edit,
     finished_without_stopping, has_unmerged_paths, rebase, rebase_abort, rebase_abort_then_cleanup,
-    rebase_is_in_progress, rebase_never_started, rebase_outcome, rebase_progress,
+    rebase_is_in_progress, rebase_is_over, rebase_never_started, rebase_outcome, rebase_progress,
     replayed_empty_hash, skip_empty_stops, verify_paused_at,
 };
 pub use git_worktree::ensure_not_checked_out_elsewhere;

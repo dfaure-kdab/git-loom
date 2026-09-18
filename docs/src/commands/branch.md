@@ -78,7 +78,7 @@ All first-parent commits from the start up to (and including) the target move in
 git loom branch feature-a    # target = HEAD (all commits go into feature-a)
 ```
 
-If the working tree has uncommitted changes, they are automatically stashed and restored after the operation.
+If the working tree has uncommitted changes, they are automatically stashed and restored after the operation, staged ones as staged.
 
 If a weave rebase encounters conflicts, it aborts automatically and reports an error — no state is saved and no `loom continue` is available. Resolve the situation and retry.
 

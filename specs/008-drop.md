@@ -45,13 +45,14 @@ worktree (Spec 004).
 
 Conflicts are resumable through `loom continue` / `loom abort`: save state in
 `.git/loom/state.json`, block other commands as specified by Spec 014, and
-restore the original operation on abort.
+restore the original operation on abort. Staged changes come back staged
+whichever way the rebase ends (Spec 014).
 
 ## Branch Targets
 
 Dropping a branch removes its ref and, unless commits are shared, all commits
 it owns. Branch drop is atomic and hard-fail: any failure restores the original
-repository rather than leaving resumable state.
+repository, staged changes included, rather than leaving resumable state.
 
 | Case | Required behavior |
 | --- | --- |

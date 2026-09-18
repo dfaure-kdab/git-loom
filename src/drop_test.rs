@@ -1221,3 +1221,75 @@ fn declining_the_confirm_is_cancelled() {
     assert!(err.downcast_ref::<ui::Cancelled>().is_some());
     assert_eq!(err.to_string(), "Cancelled");
 }
+
+// ── Staging survives a rebase that completed ─────────────────────────────
+
+/// Regression: the autostash replay unstages a staged *modification*, so a
+/// drop that succeeded has to put the index back too.
+#[test]
+fn drop_commit_keeps_staging_on_success() {
+    let t = TestRepo::new_with_remote();
+    t.commit("First", "first.txt");
+    let c2 = t.commit("Second", "second.txt");
+    t.commit("Third", "third.txt");
+    t.write_file("first.txt", "staged edit\n");
+    t.write_file("brand-new.txt", "new\n");
+    t.stage_files(&["first.txt", "brand-new.txt"]);
+    let before = t.status_porcelain();
+
+    super::drop_commit(&t.repo, &c2.to_string(), true).unwrap();
+
+    assert_eq!(t.status_porcelain(), before);
+    // The letters alone would pass on a restore that staged the wrong bytes.
+    assert_eq!(
+        crate::git::run_git_stdout(&t.workdir(), &["show", ":first.txt"]).unwrap(),
+        "staged edit\n"
+    );
+}
+
+#[test]
+fn drop_commit_keeps_staging_across_continue() {
+    let t = TestRepo::new_with_remote();
+
+    // Dropping A leaves B replaying onto a tree without A's `shared.txt`.
+    let a_oid = t.commit("version-a", "shared.txt");
+    t.write_file("shared.txt", "version-b");
+    t.stage_files(&["shared.txt"]);
+    t.commit_staged("Commit B");
+    t.write_file("bystander.txt", "bystander\n");
+    t.stage_files(&["bystander.txt"]);
+    t.commit_staged("Commit C");
+
+    t.write_file("bystander.txt", "staged edit\n");
+    t.stage_files(&["bystander.txt"]);
+    let before = t.status_porcelain();
+
+    super::drop_commit(&t.repo, &a_oid.to_string(), true).unwrap();
+    assert!(crate::git::rebase_is_in_progress(t.repo.path()));
+
+    t.write_file("shared.txt", "version-b");
+    t.stage_files(&["shared.txt"]);
+    let workdir = t.workdir();
+    crate::core::transaction::continue_cmd(&workdir, t.repo.path()).unwrap();
+
+    assert!(!crate::git::rebase_is_in_progress(t.repo.path()));
+    assert_eq!(t.status_porcelain(), before);
+}
+
+#[test]
+fn drop_branch_keeps_staging_on_success() {
+    let t = setup_woven_branch(2);
+    t.write_file("int.txt", "staged edit\n");
+    t.write_file("brand-new.txt", "new\n");
+    t.stage_files(&["int.txt", "brand-new.txt"]);
+    let before = t.status_porcelain();
+
+    super::drop_branch(&t.repo, "feature-a", true).unwrap();
+
+    assert_eq!(t.status_porcelain(), before);
+    // The letters alone would pass on a restore that staged the wrong bytes.
+    assert_eq!(
+        crate::git::run_git_stdout(&t.workdir(), &["show", ":int.txt"]).unwrap(),
+        "staged edit\n"
+    );
+}

@@ -49,7 +49,9 @@ The state file contains:
   - `reset_mixed_to` / `reset_hard_to`: OID to reset to, when git's own abort
     does not go back far enough
   - `delete_branches`: Branch names created during this operation (to delete on abort)
-  - `saved_staged_patch`: Index to restore, as a HEAD-to-index diff
+  - `saved_staged_patch`: Index to restore, as a HEAD-to-index diff. Restored
+    whichever way the rebase ends, not only on abort — see *Staging survives a
+    rebase that completed* below
   - `saved_worktree_patch`: Full working-tree diff saved before the rebase
 - `protect`: Commits the resumed rebase MUST NOT drop as empty (Spec 004). A
   `run_rebase_protecting` caller that can pause MUST record them here, or
@@ -354,8 +356,9 @@ which `after_continue` handler is invoked during dispatch.
 }
 ```
 
-After continue: runs submodule update (if applicable), reports the upstream
-commit info, and proposes removing gone-upstream branches.
+After continue: restores pre-existing staged changes, runs submodule update (if
+applicable), reports the upstream commit info, and proposes removing
+gone-upstream branches.
 
 ### `commit` context
 
@@ -392,7 +395,8 @@ message.
 }
 ```
 
-After continue: prints the drop success message.
+After continue: restores pre-existing staged changes, prints the drop success
+message.
 
 ### `reword` context
 
@@ -403,7 +407,8 @@ After continue: prints the drop success message.
 }
 ```
 
-After continue: prints the reword success message.
+After continue: restores pre-existing staged changes, prints the reword success
+message.
 
 A `reword` conflicts only in its final phase. The rebase pauses at the target
 with an `edit`, the amend happens, and `git rebase --continue` then replays
@@ -412,8 +417,9 @@ which therefore has to be remerged from scratch. A merge that was originally
 resolved by hand conflicts again at that point, because a merge commit records
 its result tree, never the resolution that produced it.
 
-Aborting needs no `rollback` fields: the amend is made inside the rebase, so
-`git rebase --abort` discards it along with everything else.
+Aborting needs no `rollback` field other than `saved_staged_patch`: the amend is
+made inside the rebase, so `git rebase --abort` discards it along with
+everything else.
 
 ### `fold` context
 
@@ -424,7 +430,8 @@ Aborting needs no `rollback` fields: the amend is made inside the rebase, so
 }
 ```
 
-After continue: prints the fold success message.
+After continue: restores pre-existing staged changes, prints the fold success
+message.
 
 ## Design Decisions
 
@@ -455,6 +462,43 @@ that replayed empty. There is nothing left to continue, so the undo is finished
 on the spot and the state goes with it; kept, it would report a paused
 operation to every later command, including the one the refusal suggests.
 
+### Staging Survives a Rebase That Completed
+
+`git rebase --autostash` replays its stash into the working tree only, so a
+staged *modification* comes back unstaged — on a rebase that completed as much
+as on one `git rebase --abort` undid. (A staged *new* file keeps its index
+entry either way.)
+
+A command that saves `saved_staged_patch` MUST therefore restore it on every
+exit: the `RebaseOutcome::Completed` arm, its `after_continue` handler, and the
+abort. The restore applies three-way, never resetting the index first: the patch
+is a HEAD-to-index diff, and a plain apply would refuse the whole of it over
+either a staged *new* file whose entry survived the autostash or a hunk whose
+context the rebase rewrote. Resetting to make it apply does not help and can
+lose work: on the success path HEAD has moved, so the reset lands the index on
+the *new* HEAD while the patch is against the old one — and it has already
+dropped what the autostash preserved, which the failing apply then cannot put
+back.
+
+The restore is best-effort and MUST NOT fail its caller: it runs after that
+command's own rewrite has landed, so an error here would report a rewrite that
+succeeded as a failure — and one caller deletes the branch it just wove. What
+it cannot replay it parks as a patch file and names, rather than dropping: where
+the staged side differed from the working tree, a clean autostash replay takes
+the stash with it and that patch is what is left.
+
+A command that unstages before its rebase, and rewrites only files the patch
+does not name, may restore with a plain apply instead — its index is at HEAD
+and the patch's context is untouched. So may one restoring after
+`git rebase --abort`, which puts HEAD back where the patch was taken: there a
+reset makes the index exactly what the patch expects, at the cost of dropping
+whatever the abort left staged outside it.
+
+Two exceptions: a refusal that never started the rebase autostashed nothing, and
+an abort that failed leaves the rebase on disk — neither index is loom's to
+touch. An unmerged index is left alone for the same reason: the autostash replay
+conflicted, so those stages are the user's to resolve and git kept the stash.
+
 ### Rollback Restores Pre-Existing State
 
 The rollback on `loom abort` restores all branch refs and staged/worktree
@@ -466,3 +510,9 @@ A saved patch that will not re-apply is parked as a file and named, not dropped.
 It matters most on the abort path, where a reset may have taken the working tree
 with it and the state file holding the patch is deleted as soon as the abort
 reports success — but the rule holds wherever loom puts a saved patch back.
+
+Where no `reset_*` field puts the index back at HEAD first, the staged patch
+goes on three-way over whatever the abort left, rather than over a reset. The
+result is the saved index in the ordinary case and never less than it: anything
+the abort left staged that the patch does not name survives instead of being
+discarded.

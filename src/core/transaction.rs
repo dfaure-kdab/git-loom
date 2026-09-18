@@ -69,17 +69,16 @@ impl Rollback {
         for branch in &self.delete_branches {
             let _ = git::branch_delete(workdir, branch);
         }
-        // The saved patch is a HEAD-to-index diff, so it only applies to an
-        // index that matches HEAD. A reset above has already put it there;
-        // with neither, the index is wherever the rebase's autostash left it,
-        // which is a partial restore a staged new file will not apply over.
-        if self.reset_mixed_to.is_empty()
-            && self.reset_hard_to.is_empty()
-            && !self.saved_staged_patch.is_empty()
-        {
-            git::reset_mixed(workdir, "HEAD")?;
+        if self.reset_mixed_to.is_empty() && self.reset_hard_to.is_empty() {
+            git::restore_staged_after_rebase(workdir, &self.saved_staged_patch);
+        } else {
+            // A reset above already put the index at HEAD, which is what the
+            // saved HEAD-to-index patch applies over. Those resets take a commit
+            // back, so they run even over the unmerged index a conflicted
+            // autostash replay leaves — skipping them would strand the undo
+            // half-done.
+            git::restore_staged_patch(workdir, &self.saved_staged_patch);
         }
-        git::restore_staged_patch(workdir, &self.saved_staged_patch);
         if !self.saved_worktree_patch.is_empty()
             && let Err(e) = git::apply_patch(workdir, &self.saved_worktree_patch)
         {
@@ -88,7 +87,12 @@ impl Rollback {
             // success, so whatever a reset here did or did not take, nothing
             // else keeps a copy.
             crate::core::msg::warn(&format!("could not re-apply working-tree changes: {e}"));
-            git::save_or_warn(workdir, "unrestored", &self.saved_worktree_patch, false);
+            git::save_or_warn(
+                workdir,
+                "unrestored",
+                &self.saved_worktree_patch,
+                git::Replay::Worktree,
+            );
         }
         Ok(())
     }
@@ -165,14 +169,35 @@ pub fn delete(git_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Turn a failed rebase start into an error that leaves no state behind.
+/// Turn a failed rebase into an error, clearing the state it would leave behind.
 ///
-/// Aborts a rebase that did start, then removes the state file. `run_rebase`
-/// also fails before starting one at all (a branch checked out in another
-/// worktree): left behind, the state reports a paused operation to every
-/// later loom command.
-pub fn discard_state_after(workdir: &Path, git_dir: &Path, cause: anyhow::Error) -> anyhow::Error {
+/// Aborts a rebase that did start, re-stages what its autostash replay left
+/// unstaged, then removes the state file — left behind, it reports a paused
+/// operation to every later loom command. A rebase can also fail before
+/// starting at all (a branch checked out in another worktree): that index was
+/// never touched.
+///
+/// An abort that fails is the exception: the rebase is still on disk, so the
+/// state file stays for `loom abort`, patch and all.
+///
+/// Takes the saved patch rather than the whole `Rollback`, which would suggest
+/// the rest of it gets applied here — that is `apply_abort`'s job.
+pub fn discard_state_after(
+    workdir: &Path,
+    git_dir: &Path,
+    saved_staged_patch: &str,
+    cause: anyhow::Error,
+) -> anyhow::Error {
+    // Only the pre-flight closure is tagged, so anything else — the spawn, a
+    // failure before it — counts as autostashed. Erring that way costs nothing
+    // visible: re-applying a patch the index already holds is not itself a
+    // no-op — a staged deletion whose entry is gone makes git refuse the whole
+    // patch — but `restore_staged_after_rebase` tests for that index first.
+    let autostashed = !git::rebase_never_started(&cause);
     git::rebase_abort_then_cleanup(workdir, cause, || {
+        if autostashed {
+            git::restore_staged_after_rebase(workdir, saved_staged_patch);
+        }
         if let Err(e) = delete(git_dir) {
             crate::core::msg::warn(&format!("could not remove the loom state file: {e}"));
         }
@@ -407,10 +432,9 @@ pub fn roll_back_failed_rebase(
         );
         return cause;
     }
-    // A pre-flight refusal rewrote nothing, so the index and worktree are not
-    // ours to restore — `apply_abort` would reset the index and re-apply a
-    // patch that only warns if it will not apply, losing staging that was never
-    // at risk. The refs loom made are still its own to take back.
+    // A pre-flight refusal never autostashed, so that index was never loom's:
+    // replaying a saved patch over it would put back staging the user still
+    // has. The refs loom made are still its own to take back.
     if git::rebase_never_started(&cause) {
         state.rollback.delete_temp_branches(workdir);
         if let Err(e) = delete(git_dir) {
@@ -594,13 +618,13 @@ fn abort_without_state(workdir: &Path, git_dir: &Path) -> Result<()> {
 
 fn dispatch_after_continue(workdir: &Path, state: &LoomState) -> Result<()> {
     match state.command.as_str() {
-        "update" => crate::update::after_continue(workdir, &state.context),
+        "update" => crate::update::after_continue(workdir, &state.rollback, &state.context),
         "commit" => crate::commit::after_continue(workdir, &state.rollback, &state.context),
         "absorb" => crate::absorb::after_continue(workdir, &state.rollback, &state.context),
-        "drop" => crate::drop::after_continue(&state.context),
-        "fold" => crate::fold::after_continue(workdir, &state.context),
-        "reword" => crate::reword::after_continue(workdir, &state.context),
-        "swap" => crate::swap::after_continue(workdir, &state.context),
+        "drop" => crate::drop::after_continue(workdir, &state.rollback, &state.context),
+        "fold" => crate::fold::after_continue(workdir, &state.rollback, &state.context),
+        "reword" => crate::reword::after_continue(workdir, &state.rollback, &state.context),
+        "swap" => crate::swap::after_continue(workdir, &state.rollback, &state.context),
         "merge" => crate::branch::merge::after_continue(&state.context),
         other => bail!("Unknown command '{}' in loom state file", other),
     }
@@ -956,6 +980,35 @@ mod tests {
             "not a patch at all\n",
             "the reset took these files and the state file is about to go"
         );
+    }
+
+    /// With no `reset_*` field the restore goes three-way over whatever the
+    /// abort left, so a staged *new* file the autostash kept survives instead
+    /// of being discarded by a reset the way it used to be.
+    #[test]
+    fn an_abort_without_a_reset_keeps_what_the_autostash_left_staged() {
+        let test_repo = crate::core::test_helpers::TestRepo::new();
+        test_repo.commit("A commit", "file1.txt");
+        let workdir = test_repo.workdir();
+
+        test_repo.write_file("file1.txt", "staged edit\n");
+        test_repo.write_file("brand-new.txt", "new\n");
+        test_repo.stage_files(&["file1.txt", "brand-new.txt"]);
+        let patch = git::diff_cached(&workdir).unwrap();
+        let before = test_repo.status_porcelain();
+
+        // What the autostash leaves: the modification unstaged, the new file
+        // still carrying its index entry.
+        git::unstage_files(&workdir, &["file1.txt"]).unwrap();
+
+        Rollback {
+            saved_staged_patch: patch,
+            ..Default::default()
+        }
+        .apply_abort(&workdir)
+        .unwrap();
+
+        assert_eq!(test_repo.status_porcelain(), before);
     }
 
     #[test]

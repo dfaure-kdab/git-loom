@@ -91,6 +91,16 @@ A pause MUST still be verified before anything is rewritten: the commit git reco
 
 Only the commands listed above mutate via the Weave; status, init, update, push, and branch rename do not (update may use its execution/recovery infrastructure).
 
+## Staging safety
+
+Every weave rebase runs with `--autostash`, whose replay reaches the working
+tree only: a staged *modification* comes back unstaged, on a rebase that
+completed as much as on one that was aborted. Every caller MUST therefore put
+the index back on both paths (Spec 014). The non-resumable
+`run_rebase_or_abort` does it for its own callers; a pre-flight refusal, an
+abort that left the rebase on disk, and an index left unmerged by a replay git
+could not finish are the exceptions — that index was never loom's to touch.
+
 ## Worktree ref safety
 
 Before rebase, enumerate `git worktree list --porcelain` and reject the entire operation if **any branch the todo can move** is checked out in another non-prunable worktree. This includes refs moved by `update-ref` and HEAD's own branch, moved on rebase completion. The error MUST name the branch and worktree path.

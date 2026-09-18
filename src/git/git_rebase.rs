@@ -351,6 +351,14 @@ pub fn rebase_abort(workdir: &Path) -> Result<()> {
     super::run_git(workdir, &["rebase", "--abort"])
 }
 
+/// Whether no rebase is left on disk.
+///
+/// A git dir that cannot be resolved counts as still running, so a caller that
+/// cannot tell errs toward leaving the repository alone.
+pub fn rebase_is_over(workdir: &Path) -> bool {
+    super::absolute_git_dir(workdir).is_ok_and(|git_dir| !rebase_is_in_progress(&git_dir))
+}
+
 /// Whether a rebase is in progress: git leaves a `rebase-merge/` or
 /// `rebase-apply/` directory under the git dir while one is paused.
 pub fn rebase_is_in_progress(git_dir: &Path) -> bool {
@@ -392,14 +400,10 @@ pub fn rebase_abort_then_cleanup(
     cause: anyhow::Error,
     cleanup: impl FnOnce(),
 ) -> anyhow::Error {
-    // If the git dir cannot be found, assume the worst and try the abort: a
-    // skipped cleanup strands a temp branch, while cleaning up on top of a live
-    // rebase can throw work away.
-    let running = super::absolute_git_dir(workdir)
-        .map(|git_dir| rebase_is_in_progress(&git_dir))
-        .unwrap_or(true);
-
-    if !running {
+    // Erring toward "still running" is the safe side here: a skipped cleanup
+    // strands a temp branch, while cleaning up over a live rebase throws work
+    // away.
+    if rebase_is_over(workdir) {
         cleanup();
         return cause;
     }

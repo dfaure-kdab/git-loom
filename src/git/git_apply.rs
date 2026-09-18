@@ -67,13 +67,39 @@ pub fn apply_patch_to_worktree(workdir: &Path, patch: &str) -> Result<()> {
 /// alone. A scratch index keeps the real one — staged work, intent-to-add
 /// entries, the stat cache — untouched, and leaves no conflicted entries to
 /// clean up. The outer `Result` is the setup failing, the inner one is git
-/// refusing the patch. `rerere` is off because this merge is loom replaying a patch, not
-/// a conflict the user ever resolved: recording it, or silently replaying an
-/// earlier resolution over it, would both be wrong.
+/// refusing the patch.
+///
+/// `rerere` is off because this merge is loom replaying a patch, not a conflict
+/// the user ever resolved: recording it, or silently replaying an earlier
+/// resolution over it, would both be wrong. `git apply --3way` does consult it.
 fn apply_patch_three_way(workdir: &Path, patch: &str) -> Result<Result<()>> {
+    with_scratch_index(workdir, "apply", |scratch| {
+        run_apply(
+            workdir,
+            patch,
+            &["-c", "rerere.enabled=false"],
+            &["--3way"],
+            Some(scratch),
+        )
+    })
+}
+
+/// Run `apply` against a throwaway copy of the index, whatever index git would
+/// use, and remove the copy afterwards.
+///
+/// The outer `Result` is the copy failing, the inner one is git refusing the
+/// patch.
+fn with_scratch_index(
+    workdir: &Path,
+    name: &str,
+    apply: impl FnOnce(&Path) -> Result<()>,
+) -> Result<Result<()>> {
+    // `--git-path` resolves `GIT_INDEX_FILE` when one is set, so the copy is of
+    // the same index the apply would otherwise have written.
     let index = super::git_path(workdir, "index")?;
     // Named per process: two looms in one repo must not share a scratch index.
-    let scratch = index.with_file_name(format!("loom-apply-index-{}", std::process::id()));
+    // One loom is single-threaded here, so the pid is enough to tell them apart.
+    let scratch = index.with_file_name(format!("loom-{name}-index-{}", std::process::id()));
     std::fs::copy(&index, &scratch).with_context(|| {
         format!(
             "Failed to copy '{}' to '{}'",
@@ -82,16 +108,21 @@ fn apply_patch_three_way(workdir: &Path, patch: &str) -> Result<Result<()>> {
         )
     })?;
 
-    let result = run_apply(
-        workdir,
-        patch,
-        &["-c", "rerere.enabled=false"],
-        &["--3way"],
-        Some(&scratch),
-    );
+    let _cleanup = ScratchIndex(&scratch);
+    Ok(apply(&scratch))
+}
 
-    let _ = std::fs::remove_file(&scratch);
-    Ok(result)
+/// Removes the scratch index however the closure leaves the stack, a panic
+/// inside it included — otherwise it stays in the git dir for good. The lock
+/// goes too: git writes `<index>.lock` beside it and only removes it on a run
+/// that ends cleanly.
+struct ScratchIndex<'a>(&'a Path);
+
+impl Drop for ScratchIndex<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0);
+        let _ = std::fs::remove_file(format!("{}.lock", self.0.display()));
+    }
 }
 
 /// Put the working-tree files a failed apply had already written back the way
@@ -171,6 +202,10 @@ fn run_apply(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    // No `env_remove` when there is no scratch index: an inherited
+    // `GIT_INDEX_FILE` is the index every other git call loom makes reads,
+    // `git rev-parse --git-path index` included, so overriding it here alone
+    // would apply to a different index than the caller checked.
     if let Some(index) = index_file {
         command.env("GIT_INDEX_FILE", index);
     }
@@ -207,6 +242,158 @@ fn run_apply(
     Ok(())
 }
 
+/// Put a saved staged patch back into the index after a rebase (Spec 014).
+///
+/// `--3way` rather than a plain cached apply, so this needs no reset first and
+/// touches nothing it cannot restore. It merges through the blob ids in the
+/// patch, which covers both ways a plain apply would refuse the whole patch:
+/// a staged *new* file, whose index entry survived the autostash and is already
+/// there, and a hunk whose context the rebase rewrote.
+///
+/// Rehearsed on a copy of the index first, because a three-way *conflict*
+/// writes stages 1/2/3 into whatever index it was given and then exits
+/// non-zero. Left in the real one those read as `UU` with no merge in progress
+/// and — the apply being `--cached` — no markers in the files to resolve.
+///
+/// An unmerged index is left alone: the autostash replay conflicted, so those
+/// stages are the user's own merge to finish, and git keeps the stash it could
+/// not replay. Best-effort otherwise — every caller runs this after its own
+/// rewrite has landed, so a failure here must not turn that into a command
+/// reporting failure; one caller deletes the branch it just wove on `Err`.
+pub fn restore_staged_after_rebase(workdir: &Path, patch: &str) {
+    if patch.is_empty() {
+        return;
+    }
+    // Git keeps the stash it could not replay, so the content is in there and
+    // the stages are the user's merge to finish.
+    if super::has_unmerged_paths(workdir) {
+        // `git stash pop --index` is refused while the index is unmerged, so
+        // pointing at the stash would be advice that fails when followed. The
+        // patch is the staged side, so it is handed over instead.
+        msg::warn(
+            "the index has unmerged paths, so your staged changes could not go back \
+             — resolve them, then either replay the patch below or take the staged \
+             side from the stash git kept",
+        );
+        park(workdir, patch);
+        return;
+    }
+    match rehearse_cached_three_way(workdir, patch) {
+        Ok(Ok(())) => {
+            if let Err(e) = cached_three_way(workdir, patch, None) {
+                msg::warn(&format!("could not restore your staged changes: {e}"));
+                // The rehearsal said this would land, so something moved the
+                // index in between and it may have left stages behind.
+                if super::has_unmerged_paths(workdir) {
+                    msg::warn("it left unmerged entries in the index — `git reset` clears them");
+                }
+                park(workdir, patch);
+            }
+        }
+        // The rehearsal kept the conflict out of the real index, which leaves
+        // the patch the only copy of the staged side: a clean autostash replay
+        // put the *worktree* side back and then dropped the stash. It is all or
+        // nothing — one hunk that will not land parks the whole patch.
+        Ok(Err(e)) => {
+            // Several callers restore before deleting their state file, so a
+            // failed delete can bring them back here, and a re-apply is not
+            // harmless: git refuses a deletion whose index entry is already
+            // gone, and refuses the whole patch with it.
+            //
+            // Byte equality of two `diff_cached` outputs is the only test here
+            // that cannot cost data. It is exact, so a HEAD the rebase rewrote
+            // reads as "not applied" and parks a patch that was already back —
+            // a false alarm, which is the safe way to be wrong. Asking git
+            // instead is not: every cheap probe answers "already applied" for
+            // a patch that still has staged work in it. A rehearsal that
+            // changes nothing does not mean the patch is in the index, because
+            // git validates the whole patch before writing any of it, and a
+            // reverse three-way merges clean when the index still holds the
+            // preimage. Both drop the patch silently.
+            if super::diff_cached(workdir).is_ok_and(|current| current == patch) {
+                return;
+            }
+            msg::warn(&format!(
+                "your staged changes no longer apply over what the rebase wrote: {e}"
+            ));
+            park(workdir, patch);
+        }
+        // The rehearsal never got as far as asking git, so nothing is known
+        // about the patch itself.
+        Err(e) => {
+            msg::warn(&format!(
+                "could not test whether your staged changes still apply: {e}"
+            ));
+            park(workdir, patch);
+        }
+    }
+}
+
+/// Put back a patch loom unstaged itself, after a call that aborted its own
+/// rebase.
+///
+/// Unlike [`restore_or_park_after_abort`], a refusal from before the rebase
+/// started still restores: no autostash ever held this staged side, because
+/// loom emptied the index before the rebase existed.
+pub fn restore_loom_unstaged_after_abort(workdir: &Path, patch: &str, err: &anyhow::Error) {
+    if super::rebase_never_started(err) {
+        restore_staged_patch(workdir, patch);
+    } else {
+        restore_or_park_after_abort(workdir, patch, err);
+    }
+}
+
+/// Put the staged patch back after a call that aborted its own rebase, or park
+/// it if that abort failed and left the rebase on disk.
+///
+/// For the callers with no `LoomState`: nothing else will come back for this
+/// patch, so it goes to the user rather than being dropped. A refusal from
+/// before the rebase started never autostashed, and needs neither.
+pub fn restore_or_park_after_abort(workdir: &Path, patch: &str, err: &anyhow::Error) {
+    if super::rebase_never_started(err) {
+        return;
+    }
+    if super::rebase_is_over(workdir) {
+        restore_staged_after_rebase(workdir, patch);
+    } else {
+        msg::warn("the rebase is still on disk, so your staged changes could not be put back");
+        park(workdir, patch);
+    }
+}
+
+/// Hand the staged patch to the user: a clean autostash replay puts the
+/// *worktree* side back and drops the stash, so where the staged side differed
+/// this patch is what is left of it.
+fn park(workdir: &Path, patch: &str) {
+    save_or_warn(workdir, "unrestored-staged", patch, Replay::CachedThreeWay);
+}
+
+/// Apply `patch` to an index three-way, `rerere` off for the reason given on
+/// [`apply_patch_three_way`].
+fn cached_three_way(workdir: &Path, patch: &str, index_file: Option<&Path>) -> Result<()> {
+    run_apply(
+        workdir,
+        patch,
+        &["-c", "rerere.enabled=false"],
+        &["--cached", "--3way"],
+        index_file,
+    )
+}
+
+/// Try the apply against a throwaway copy of the index, so a conflict leaves
+/// its stages there instead of in the real one.
+///
+/// The copy is thrown away and the apply repeated against the real index rather
+/// than renamed over it: only git's own lockfile protocol may replace `index`,
+/// and a rename behind its back would race any other git touching the repo. The
+/// second run is the same patch over a byte copy of the same index, so it is
+/// the same merge.
+fn rehearse_cached_three_way(workdir: &Path, patch: &str) -> Result<Result<()>> {
+    with_scratch_index(workdir, "restage", |scratch| {
+        cached_three_way(workdir, patch, Some(scratch))
+    })
+}
+
 /// Re-apply a previously saved staged patch, parking it on failure.
 ///
 /// No-ops if `patch` is empty. The primary operation has already succeeded or
@@ -224,7 +411,7 @@ pub fn restore_staged_patch(workdir: &Path, patch: &str) {
         msg::warn(&format!(
             "could not restore pre-existing staged changes: {e}"
         ));
-        save_or_warn(workdir, "unrestored-staged", patch, true);
+        save_or_warn(workdir, "unrestored-staged", patch, Replay::Cached);
     }
 }
 
@@ -279,6 +466,35 @@ pub fn save_patch_aside(workdir: &Path, name: &str, patch: &str) -> Result<PathB
     )
 }
 
+/// How to replay a parked patch by hand.
+#[derive(Clone, Copy, Debug)]
+pub enum Replay {
+    /// Into the working tree.
+    Worktree,
+    /// Into the index.
+    Cached,
+    /// Into the index, merging: what is parked after a three-way apply was
+    /// refused, where the plain `--cached` recipe would be refused the same way.
+    /// Run by hand it can leave stages in the index — loom rehearses to avoid
+    /// that, the user cannot, so `git reset` undoes it. The printed command
+    /// turns `rerere` off: this patch already conflicted once, which is when a
+    /// stale recorded resolution would be substituted into it.
+    CachedThreeWay,
+}
+
+impl Replay {
+    fn command(self, path: &Path) -> String {
+        let path = path.display();
+        match self {
+            Replay::Worktree => format!("git apply {path}"),
+            Replay::Cached => format!("git apply --cached {path}"),
+            Replay::CachedThreeWay => {
+                format!("git -c rerere.enabled=false apply --cached --3way {path}")
+            }
+        }
+    }
+}
+
 /// Park a patch that could not be replayed, and say where it went and how to
 /// replay it by hand — or, if even that fails, where the last copy still is.
 ///
@@ -288,18 +504,17 @@ pub fn save_patch_aside(workdir: &Path, name: &str, patch: &str) -> Result<PathB
 /// A caller that can name something better calls [`save_patch_aside`] and words
 /// its own, as `fold`'s uncommit does.
 ///
-/// `cached` tells the two halves apart: the staged snapshot is a HEAD → index
+/// [`Replay`] tells the halves apart: the staged snapshot is a HEAD → index
 /// diff, so replaying it into the working tree instead would apply it twice
 /// over.
-pub fn save_or_warn(workdir: &Path, name: &str, patch: &str, cached: bool) {
+pub fn save_or_warn(workdir: &Path, name: &str, patch: &str, replay: Replay) {
     if patch.is_empty() {
         return;
     }
-    let flag = if cached { " --cached" } else { "" };
     match save_patch_aside(workdir, name, patch) {
         Ok(path) => msg::warn(&format!(
-            "those changes are saved as a patch — replay them with `git apply{flag} {}`",
-            path.display()
+            "those changes are saved as a patch — replay them with `{}`",
+            replay.command(&path)
         )),
         Err(e) => msg::warn(&format!(
             "the patch of those changes could not be saved either ({e})"
