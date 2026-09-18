@@ -235,7 +235,9 @@ pub fn skip_empty_stops(
 ) -> Result<RebaseOutcome> {
     let mut skipped_already: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    while outcome == RebaseOutcome::Stopped && !has_unmerged_paths(workdir) {
+    // Only git saying "no conflicts" carries on: `--skip` below is a hard reset,
+    // and an unmerged index — or one it could not read — must stop the loop.
+    while outcome == RebaseOutcome::Stopped && matches!(has_unmerged_paths(workdir), Ok(false)) {
         let Some(sha) = stopped_sha(git_dir) else {
             return Ok(outcome);
         };
@@ -351,6 +353,14 @@ pub fn rebase_abort(workdir: &Path) -> Result<()> {
     super::run_git(workdir, &["rebase", "--abort"])
 }
 
+/// Whether no rebase is left on disk.
+///
+/// A git dir that cannot be resolved counts as still running, so a caller that
+/// cannot tell errs toward leaving the repository alone.
+pub fn rebase_is_over(workdir: &Path) -> bool {
+    super::absolute_git_dir(workdir).is_ok_and(|git_dir| !rebase_is_in_progress(&git_dir))
+}
+
 /// Whether a rebase is in progress: git leaves a `rebase-merge/` or
 /// `rebase-apply/` directory under the git dir while one is paused.
 pub fn rebase_is_in_progress(git_dir: &Path) -> bool {
@@ -392,14 +402,10 @@ pub fn rebase_abort_then_cleanup(
     cause: anyhow::Error,
     cleanup: impl FnOnce(),
 ) -> anyhow::Error {
-    // If the git dir cannot be found, assume the worst and try the abort: a
-    // skipped cleanup strands a temp branch, while cleaning up on top of a live
-    // rebase can throw work away.
-    let running = super::absolute_git_dir(workdir)
-        .map(|git_dir| rebase_is_in_progress(&git_dir))
-        .unwrap_or(true);
-
-    if !running {
+    // Erring toward "still running" is the safe side here: a skipped cleanup
+    // strands a temp branch, while cleaning up over a live rebase throws work
+    // away.
+    if rebase_is_over(workdir) {
         cleanup();
         return cause;
     }
@@ -425,7 +431,10 @@ pub fn rebase_abort_then_cleanup(
 /// process), and the abort itself may fail — saying "aborted" then would strand
 /// the user in a half-rewritten repository.
 pub fn abort_after_failure(workdir: &Path) -> anyhow::Error {
-    let conflicted = has_unmerged_paths(workdir) || auto_merge_id(workdir).is_some();
+    // Only the wording of the error rides on this, so a git that cannot answer
+    // keeps the "run `loom trace`" hint rather than claiming conflicts.
+    let conflicted =
+        has_unmerged_paths(workdir).unwrap_or(false) || auto_merge_id(workdir).is_some();
     match rebase_abort(workdir) {
         Ok(()) if conflicted => anyhow::anyhow!("Rebase failed with conflicts — aborted"),
         Ok(()) => anyhow::anyhow!(
@@ -442,9 +451,13 @@ pub fn abort_after_failure(workdir: &Path) -> anyhow::Error {
 
 /// Whether the index has unmerged entries — i.e. the operation really did stop
 /// on a conflict.
-pub fn has_unmerged_paths(workdir: &Path) -> bool {
+///
+/// `Err` is git failing to answer — a broken index, no repository. Every caller
+/// today defaults it to the side that is safe for what it does next rather than
+/// propagating it, the reason being in `loom trace` either way.
+pub fn has_unmerged_paths(workdir: &Path) -> Result<bool> {
     super::run_git_stdout(workdir, &["diff", "--name-only", "--diff-filter=U"])
-        .is_ok_and(|out| !out.trim().is_empty())
+        .map(|out| !out.trim().is_empty())
 }
 
 /// The id of `AUTO_MERGE`, the ref git keeps while a conflicted merge is
@@ -457,6 +470,12 @@ pub fn has_unmerged_paths(workdir: &Path) -> bool {
 /// reftable backend keeps no file of that name. Only the `ort` strategy writes
 /// it, so under any other this reports `None` and the caller falls back to its
 /// generic message.
+///
+/// `None` is not authoritative. Git does distinguish the cases — 1 for a missing
+/// ref, 128 when it could not look — but `run_git_stdout` reports every non-zero
+/// exit alike, so both arrive here the same way. That costs nothing today:
+/// `None` is the safe answer for both callers, sending one to the generic
+/// message and the other to `PauseReason::Other`.
 pub fn auto_merge_id(workdir: &Path) -> Option<String> {
     let out =
         super::run_git_stdout(workdir, &["rev-parse", "--verify", "--quiet", "AUTO_MERGE"]).ok()?;

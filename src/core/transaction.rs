@@ -199,7 +199,13 @@ enum PauseReason {
 /// unchanged one is the conflict the user was already on, so nothing resolved
 /// it for them and the step failed for some other reason.
 fn pause_reason(workdir: &Path, before: Option<&str>) -> PauseReason {
-    if git::has_unmerged_paths(workdir) {
+    // When git cannot answer, classify nothing: `Other` sends the user to
+    // `loom trace` rather than reading `AUTO_MERGE` and claiming `rerere`
+    // resolved conflicts that may still be sitting there unmerged.
+    let Ok(unmerged) = git::has_unmerged_paths(workdir) else {
+        return PauseReason::Other;
+    };
+    if unmerged {
         PauseReason::Conflicts
     } else if git::auto_merge_id(workdir).is_some_and(|id| Some(id.as_str()) != before) {
         PauseReason::ResolvedConflicts
@@ -866,7 +872,7 @@ mod tests {
         test_repo.commit_staged("topic side");
         git::run_git(&workdir, &["rebase", &onto]).unwrap_err();
         assert!(
-            git::has_unmerged_paths(&workdir),
+            git::has_unmerged_paths(&workdir).unwrap(),
             "the rebase must conflict"
         );
         test_repo
@@ -955,6 +961,25 @@ mod tests {
             std::fs::read_to_string(&parked).unwrap(),
             "not a patch at all\n",
             "the reset took these files and the state file is about to go"
+        );
+    }
+
+    /// With the index unreadable there may be unmerged paths behind `AUTO_MERGE`
+    /// that nothing resolved, so the pause is unclassifiable rather than fixed.
+    #[test]
+    fn a_pause_git_cannot_classify_is_not_a_resolved_one() {
+        let test_repo = repo_stopped_on_conflict();
+        let workdir = test_repo.workdir();
+        test_repo.write_file("f.txt", "resolved\n");
+        git::run_git(&workdir, &["add", "f.txt"]).unwrap();
+        assert_eq!(pause_reason(&workdir, None), PauseReason::ResolvedConflicts);
+
+        std::fs::write(test_repo.repo.path().join("index"), b"garbage").unwrap();
+
+        assert_eq!(
+            pause_reason(&workdir, None),
+            PauseReason::Other,
+            "`rerere` cannot be credited for a conflict git will not report on"
         );
     }
 

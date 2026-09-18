@@ -75,6 +75,10 @@ Loom therefore describes the pause from what it finds:
 | Unmerged paths | Conflicts detected — resolve them |
 | Clean index, new `AUTO_MERGE` | `rerere` resolved the conflicts — review the result |
 | Clean index, unchanged or no `AUTO_MERGE` | The operation stopped part-way — run `loom trace` |
+| Index unreadable | The operation stopped part-way — run `loom trace` |
+
+A git that cannot say whether the index is unmerged is never credited to
+`rerere`: the pause is unclassifiable, so it takes the generic message.
 
 `AUTO_MERGE` is the ref git keeps while a conflicted merge is unfinished — a
 conflicted pick during a rebase included — and drops once the resolution is

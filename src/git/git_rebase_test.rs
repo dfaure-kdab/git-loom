@@ -223,7 +223,7 @@ fn rerere_resolved_stop_is_still_a_conflict() {
         "rerere should have replayed the recorded resolution"
     );
     assert!(
-        !super::has_unmerged_paths(&workdir),
+        !super::has_unmerged_paths(&workdir).unwrap(),
         "rerere staged its resolution, so nothing is left unmerged"
     );
     assert!(
@@ -315,7 +315,7 @@ fn untracked_file_stop_is_not_a_conflict() {
         super::rebase_is_in_progress(test_repo.repo.path()),
         "the blocked pick stops the rebase"
     );
-    assert!(!super::has_unmerged_paths(&workdir));
+    assert!(!super::has_unmerged_paths(&workdir).unwrap());
     assert!(
         super::auto_merge_id(&workdir).is_none(),
         "an untracked file in the way is not a conflict"
@@ -607,4 +607,15 @@ fn a_protected_commit_is_refused_even_with_local_changes() {
         "`loom abort` is the same hard reset, so it is not the bare advice: {err}"
     );
     crate::git::rebase_abort(&workdir).unwrap();
+}
+
+/// The probe reports a git that could not answer rather than reading silence
+/// as "no conflicts": `skip_empty_stops` guards a hard reset on it.
+#[test]
+fn has_unmerged_paths_reports_a_git_that_could_not_answer() {
+    let outside = tempfile::tempdir().unwrap();
+    assert!(
+        super::has_unmerged_paths(outside.path()).is_err(),
+        "no repository here, so there is no index to answer about"
+    );
 }

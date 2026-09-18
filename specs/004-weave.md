@@ -91,6 +91,12 @@ A pause MUST still be verified before anything is rewritten: the commit git reco
 
 Only the commands listed above mutate via the Weave; status, init, update, push, and branch rename do not (update may use its execution/recovery infrastructure).
 
+## Empty-stop safety
+
+Carrying past an empty stop uses `git rebase --skip`, a hard reset. It MUST NOT
+run over an index with unmerged entries, nor over one git could not read: a
+probe that fails stops the loop and leaves the rebase for the user (Spec 014).
+
 ## Worktree ref safety
 
 Before rebase, enumerate `git worktree list --porcelain` and reject the entire operation if **any branch the todo can move** is checked out in another non-prunable worktree. This includes refs moved by `update-ref` and HEAD's own branch, moved on rebase completion. The error MUST name the branch and worktree path.
