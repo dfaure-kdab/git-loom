@@ -94,7 +94,7 @@ pub fn run(
 
     // Restore the saved staged work if the index turns out to be empty.
     if let Err(e) = repo::verify_has_staged_changes(&repo) {
-        git::restore_staged_patch(&workdir, &saved_staged)?;
+        git::restore_staged_patch(&workdir, &saved_staged);
         return Err(e);
     }
 
@@ -107,7 +107,7 @@ pub fn run(
     // "origin/main").
     if loose {
         let result = do_commit();
-        git::restore_staged_patch(&workdir, &saved_staged)?;
+        git::restore_staged_patch(&workdir, &saved_staged);
         result?;
         let new_head = repo::head_oid(&repo)?;
         msg::success(&format!(
@@ -127,7 +127,7 @@ pub fn run(
         match resolve_branch_target(&repo, &info, &workdir, branch.as_deref()) {
             Ok(resolved) => resolved,
             Err(e) => {
-                git::restore_staged_patch(&workdir, &saved_staged)?;
+                git::restore_staged_patch(&workdir, &saved_staged);
                 return Err(e);
             }
         };
@@ -138,7 +138,7 @@ pub fn run(
         is_branch_at_merge_base(&repo, &branch_name, info.upstream.merge_base_oid)?;
 
     if let Err(e) = do_commit() {
-        git::restore_staged_patch(&workdir, &saved_staged)?;
+        git::restore_staged_patch(&workdir, &saved_staged);
         return Err(e);
     }
 
@@ -222,7 +222,7 @@ pub fn after_continue(
 
 /// Post-rebase work: restore staged changes and print success message.
 fn post_commit(workdir: &Path, branch_name: &str, saved_staged: &str) -> Result<()> {
-    git::restore_staged_patch(workdir, saved_staged)?;
+    git::restore_staged_patch(workdir, saved_staged);
 
     let new_hash = git::rev_parse(workdir, branch_name)?;
 
@@ -258,7 +258,7 @@ fn resolve_staging_patch(
 
     let confirmed = staging::run_hunk_picker(repo, workdir, files, theme)?;
     if !confirmed {
-        git::restore_staged_patch(workdir, &saved_staged)?;
+        git::restore_staged_patch(workdir, &saved_staged);
         return Err(msg::cancelled());
     }
 

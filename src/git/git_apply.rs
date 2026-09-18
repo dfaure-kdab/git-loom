@@ -211,7 +211,10 @@ fn run_apply(
 ///
 /// No-ops if `patch` is empty. The primary operation has already succeeded, so
 /// this is best-effort.
-pub fn restore_staged_patch(workdir: &Path, patch: &str) -> Result<()> {
+///
+/// Nothing for a caller to `?` on: doing so would report this in place of
+/// whatever actually stopped the command.
+pub fn restore_staged_patch(workdir: &Path, patch: &str) {
     if !patch.is_empty()
         && let Err(e) = apply_cached_patch(workdir, patch)
     {
@@ -219,7 +222,6 @@ pub fn restore_staged_patch(workdir: &Path, patch: &str) -> Result<()> {
             "could not restore pre-existing staged changes: {e}"
         ));
     }
-    Ok(())
 }
 
 /// Write a patch that could not be applied under the git dir, so the user can

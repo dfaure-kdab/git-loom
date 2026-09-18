@@ -79,7 +79,7 @@ impl Rollback {
         {
             git::reset_mixed(workdir, "HEAD")?;
         }
-        git::restore_staged_patch(workdir, &self.saved_staged_patch)?;
+        git::restore_staged_patch(workdir, &self.saved_staged_patch);
         if !self.saved_worktree_patch.is_empty()
             && let Err(e) = git::apply_patch(workdir, &self.saved_worktree_patch)
         {

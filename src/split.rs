@@ -175,7 +175,7 @@ fn run_split(
     let saved_staged = staging::save_and_unstage_staged(repo, workdir)?;
     let split_result = do_split(is_head);
     // Restore pre-existing staged changes regardless of outcome.
-    git::restore_staged_patch(workdir, &saved_staged)?;
+    git::restore_staged_patch(workdir, &saved_staged);
     let (h1, h2) = split_result?;
     msg::success(&format!(
         "Split `{}` into `{}` and `{}`",
