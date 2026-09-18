@@ -180,3 +180,25 @@ fn apply_to_worktree_leaves_the_tree_alone_when_nothing_was_written() {
         "and so must the file the patch was refused over"
     );
 }
+
+/// The saved patch is what is left of the user's work when a rollback cannot
+/// replay it, so two failures in a row must not land on the same file.
+#[test]
+fn save_patch_aside_never_writes_over_an_earlier_save() {
+    let test_repo = TestRepo::new();
+    test_repo.commit("A commit", "file1.txt");
+    let workdir = test_repo.workdir();
+
+    let first = git::save_patch_aside(&workdir, "unrestored", "first patch").unwrap();
+    let second = git::save_patch_aside(&workdir, "unrestored", "second patch").unwrap();
+
+    assert_eq!(first.file_name().unwrap(), "unrestored-0.patch");
+    assert_eq!(second.file_name().unwrap(), "unrestored-1.patch");
+    assert_eq!(std::fs::read_to_string(&first).unwrap(), "first patch");
+    assert_eq!(std::fs::read_to_string(&second).unwrap(), "second patch");
+    assert!(
+        first.starts_with(test_repo.repo.path()),
+        "saved under the git dir, not next to the user's files: {}",
+        first.display()
+    );
+}
