@@ -90,3 +90,82 @@ fn stage_path_accepts_already_staged_deletion() {
     assert!(result.is_ok(), "staging failed: {:?}", result);
     assert_eq!(test_repo.status_porcelain().trim(), "D  file1.txt");
 }
+
+/// `--porcelain` and its siblings make `git commit` print the status and exit
+/// 0 without committing; the callers rewrite history on the amend's word.
+#[test]
+fn commit_amend_no_edit_refuses_an_amend_that_did_not_commit() {
+    let test_repo = TestRepo::new();
+    test_repo.commit("First commit", "file1.txt");
+    test_repo.write_file("file1.txt", "amended");
+    let workdir = test_repo.workdir();
+    git::stage_files(workdir.as_path(), &["file1.txt"]).unwrap();
+    let head = test_repo.head_oid();
+
+    let result = git::commit_amend_no_edit(workdir.as_path(), &["--porcelain"]);
+
+    assert!(result.is_err(), "the dry run should not pass for an amend");
+    assert_eq!(test_repo.head_oid(), head);
+    assert_eq!(test_repo.status_porcelain().trim(), "M  file1.txt");
+}
+
+/// Loom's own arguments come last, so git's last-wins parse keeps the amend
+/// whatever the user forwards (Spec 021).
+#[test]
+fn commit_amend_no_edit_outranks_a_forwarded_no_amend() {
+    let test_repo = TestRepo::new();
+    test_repo.commit("First commit", "file1.txt");
+    test_repo.write_file("file1.txt", "amended");
+    let workdir = test_repo.workdir();
+    git::stage_files(workdir.as_path(), &["file1.txt"]).unwrap();
+    let head = test_repo.head_oid();
+    let parent = git::rev_parse(workdir.as_path(), "HEAD^").unwrap();
+
+    git::commit_amend_no_edit(workdir.as_path(), &["--no-amend"]).unwrap();
+
+    assert_ne!(test_repo.head_oid(), head, "the amend replaced HEAD");
+    assert_eq!(
+        git::rev_parse(workdir.as_path(), "HEAD^").unwrap(),
+        parent,
+        "nothing was committed on top"
+    );
+    assert_eq!(test_repo.get_message(0), "First commit");
+}
+
+/// A hook that stages something of its own must not make a successful amend
+/// look like a dry run — on either side of the commit. A `pre-commit` hook
+/// changes what is committed, and `post-commit` runs whatever `--no-verify`
+/// says.
+#[cfg(unix)]
+#[test]
+fn commit_amend_no_edit_survives_a_hook_that_stages() {
+    for (when, arg) in [("pre-commit", "-q"), ("post-commit", "--no-verify")] {
+        let test_repo = TestRepo::new();
+        test_repo.commit("First commit", "file1.txt");
+        let workdir = test_repo.workdir();
+        test_repo.install_hook(when, "echo hooked > hooked.txt\ngit add hooked.txt\n");
+        test_repo.write_file("file1.txt", "amended");
+        git::stage_files(workdir.as_path(), &["file1.txt"]).unwrap();
+
+        git::commit_amend_no_edit(workdir.as_path(), &[arg]).unwrap();
+
+        assert_eq!(test_repo.get_message(0), "First commit", "{when}");
+        assert_eq!(test_repo.read_file("file1.txt"), "amended", "{when}");
+        let hooked_committed = test_repo.commit_has_file(test_repo.head_oid(), "hooked.txt");
+        assert_eq!(hooked_committed, when == "pre-commit", "{when}");
+    }
+}
+
+#[test]
+fn commit_amend_no_edit_takes_an_argument_that_does_commit() {
+    let test_repo = TestRepo::new();
+    test_repo.commit("First commit", "file1.txt");
+    test_repo.write_file("file1.txt", "amended");
+    let workdir = test_repo.workdir();
+    git::stage_files(workdir.as_path(), &["file1.txt"]).unwrap();
+
+    git::commit_amend_no_edit(workdir.as_path(), &["--no-verify"]).unwrap();
+
+    assert_eq!(test_repo.get_message(0), "First commit");
+    assert_eq!(test_repo.status_porcelain().trim(), "");
+}

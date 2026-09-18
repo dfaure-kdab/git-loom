@@ -393,7 +393,7 @@ fn execute_action(
         Action::Fold { sources, target } => {
             let mut args = sources;
             args.push(target);
-            fold::run(false, false, None, HunkArgs::default(), args, theme)
+            fold::run(false, false, None, HunkArgs::default(), args, vec![], theme)
         }
         Action::NewBranch { name, target } => branch::new::run(Some(name), target),
         Action::Drop { targets } => drop::run(targets, false),

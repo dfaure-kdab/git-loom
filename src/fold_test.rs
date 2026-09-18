@@ -21,6 +21,7 @@ fn fold_file_into_head() {
         &["file1.txt".to_string()],
         &head_oid.to_string(),
         false,
+        &[],
     );
 
     assert!(
@@ -50,6 +51,7 @@ fn fold_multiple_files_into_head() {
         &["file1.txt".to_string(), "new_file.txt".to_string()],
         &head_oid.to_string(),
         false,
+        &[],
     );
 
     assert!(result.is_ok(), "fold failed: {:?}", result);
@@ -71,6 +73,7 @@ fn fold_file_into_non_head_commit() {
         &["file1.txt".to_string()],
         &c1_oid.to_string(),
         false,
+        &[],
     );
 
     assert!(
@@ -97,6 +100,7 @@ fn fold_file_no_changes_fails() {
         &["file1.txt".to_string()],
         &head_oid.to_string(),
         false,
+        &[],
     );
 
     assert!(result.is_err());
@@ -117,6 +121,7 @@ fn fold_file_into_non_head_with_other_changes_autostashed() {
         &["file1.txt".to_string()],
         &c1_oid.to_string(),
         false,
+        &[],
     );
 
     assert!(
@@ -153,6 +158,7 @@ fn fold_file_into_woven_branch_commit() {
         &["feature1".to_string()],
         &feat1_oid.to_string(),
         false,
+        &[],
     );
 
     assert!(
@@ -221,7 +227,7 @@ fn fold_patch_only_staged_hunk_is_folded_into_head() {
     assert_eq!(staged, vec!["file.txt"]);
 
     let result =
-        super::fold_files_into_commit(&test_repo.repo, &staged, &head_oid.to_string(), true);
+        super::fold_files_into_commit(&test_repo.repo, &staged, &head_oid.to_string(), true, &[]);
     assert!(
         result.is_ok(),
         "fold_files_into_commit failed: {:?}",
@@ -278,7 +284,7 @@ fn fold_patch_only_staged_hunk_is_folded_into_non_head() {
 
     let staged = crate::core::repo::get_staged_files(&test_repo.repo).unwrap();
     let result =
-        super::fold_files_into_commit(&test_repo.repo, &staged, &target_oid.to_string(), true);
+        super::fold_files_into_commit(&test_repo.repo, &staged, &target_oid.to_string(), true, &[]);
     assert!(
         result.is_ok(),
         "fold_files_into_commit failed: {:?}",
@@ -464,6 +470,7 @@ fn fold_commit_to_branch_via_short_ids() {
             None,
             HunkArgs::default(),
             vec![commit_sid.clone(), branch_sid.clone()],
+            vec![],
             &crate::core::graph::Theme::dark(),
         )
     });
@@ -1130,6 +1137,7 @@ fn fold_unstaged_into_commit() {
             None,
             HunkArgs::default(),
             vec!["zz".into(), "HEAD".into()],
+            vec![],
             &crate::core::graph::Theme::dark(),
         )
     });
@@ -1152,6 +1160,7 @@ fn fold_unstaged_clean_tree_fails() {
             None,
             HunkArgs::default(),
             vec!["zz".into(), "HEAD".into()],
+            vec![],
             &crate::core::graph::Theme::dark(),
         )
     });
@@ -1179,8 +1188,12 @@ fn fold_commit_file_to_unstaged_head() {
 
     let head_oid = test_repo.head_oid();
 
-    let result =
-        super::fold_commit_file_to_unstaged(&test_repo.repo, &head_oid.to_string(), "file1.txt");
+    let result = super::fold_commit_file_to_unstaged(
+        &test_repo.repo,
+        &head_oid.to_string(),
+        "file1.txt",
+        &[],
+    );
 
     assert!(
         result.is_ok(),
@@ -1212,7 +1225,7 @@ fn fold_commit_file_to_unstaged_non_head() {
     test_repo.commit_staged("Second commit");
 
     let result =
-        super::fold_commit_file_to_unstaged(&test_repo.repo, &c1_oid.to_string(), "file1.txt");
+        super::fold_commit_file_to_unstaged(&test_repo.repo, &c1_oid.to_string(), "file1.txt", &[]);
 
     assert!(
         result.is_ok(),
@@ -1243,7 +1256,8 @@ fn fold_commit_file_to_unstaged_submodule() {
     test_repo.commit_staged("Bump submodule");
     let head_oid = test_repo.head_oid();
 
-    super::fold_commit_file_to_unstaged(&test_repo.repo, &head_oid.to_string(), "Data").unwrap();
+    super::fold_commit_file_to_unstaged(&test_repo.repo, &head_oid.to_string(), "Data", &[])
+        .unwrap();
 
     let new_head = test_repo.head_oid();
     assert_eq!(test_repo.commit_file_paths(new_head), ["other.txt"]);
@@ -1267,7 +1281,8 @@ fn fold_commit_file_to_unstaged_submodule_non_head() {
     test_repo.stage_files(&["later.txt"]);
     test_repo.commit_staged("Later");
 
-    super::fold_commit_file_to_unstaged(&test_repo.repo, &bump_oid.to_string(), "Data").unwrap();
+    super::fold_commit_file_to_unstaged(&test_repo.repo, &bump_oid.to_string(), "Data", &[])
+        .unwrap();
 
     assert_eq!(
         test_repo.commit_file_paths(test_repo.get_oid(1)),
@@ -1289,7 +1304,8 @@ fn fold_commit_file_to_unstaged_submodule_add() {
     test_repo.commit_staged("Add submodule");
     let head_oid = test_repo.head_oid();
 
-    super::fold_commit_file_to_unstaged(&test_repo.repo, &head_oid.to_string(), "Data").unwrap();
+    super::fold_commit_file_to_unstaged(&test_repo.repo, &head_oid.to_string(), "Data", &[])
+        .unwrap();
 
     let new_head = test_repo.head_oid();
     assert!(!test_repo.commit_has_file(new_head, "Data"));
@@ -1365,7 +1381,8 @@ fn fold_commit_file_to_unstaged_submodule_remove_keeps_the_checkout() {
     test_repo.commit_staged("Remove submodule");
     let head_oid = test_repo.head_oid();
 
-    super::fold_commit_file_to_unstaged(&test_repo.repo, &head_oid.to_string(), "Data").unwrap();
+    super::fold_commit_file_to_unstaged(&test_repo.repo, &head_oid.to_string(), "Data", &[])
+        .unwrap();
 
     let new_head = test_repo.head_oid();
     assert_eq!(test_repo.submodule_oid(new_head, "Data"), first);
@@ -1388,7 +1405,8 @@ fn fold_commit_file_to_unstaged_submodule_remove_drops_the_checkout() {
     test_repo.commit_staged("Remove submodule");
     let head_oid = test_repo.head_oid();
 
-    super::fold_commit_file_to_unstaged(&test_repo.repo, &head_oid.to_string(), "Data").unwrap();
+    super::fold_commit_file_to_unstaged(&test_repo.repo, &head_oid.to_string(), "Data", &[])
+        .unwrap();
 
     let new_head = test_repo.head_oid();
     assert_eq!(test_repo.submodule_oid(new_head, "Data"), first);
@@ -1417,7 +1435,8 @@ fn fold_commit_file_to_unstaged_submodule_remove_non_head() {
     test_repo.stage_files(&["later.txt"]);
     test_repo.commit_staged("Later");
 
-    super::fold_commit_file_to_unstaged(&test_repo.repo, &remove_oid.to_string(), "Data").unwrap();
+    super::fold_commit_file_to_unstaged(&test_repo.repo, &remove_oid.to_string(), "Data", &[])
+        .unwrap();
 
     assert_eq!(test_repo.submodule_oid(test_repo.head_oid(), "Data"), first);
     assert_eq!(
@@ -1494,7 +1513,8 @@ fn fold_commit_file_to_unstaged_submodule_non_ascii_path() {
     test_repo.commit_staged("Bump submodule");
     let head_oid = test_repo.head_oid();
 
-    super::fold_commit_file_to_unstaged(&test_repo.repo, &head_oid.to_string(), "Dätä").unwrap();
+    super::fold_commit_file_to_unstaged(&test_repo.repo, &head_oid.to_string(), "Dätä", &[])
+        .unwrap();
 
     let new_head = test_repo.head_oid();
     assert_eq!(test_repo.commit_file_paths(new_head), ["other.txt"]);
@@ -1621,7 +1641,7 @@ fn fold_commit_file_to_unstaged_rollback_keeps_uncommitted_changes() {
     test_repo.write_file("other.txt", "uncommitted work");
 
     let err =
-        super::fold_commit_file_to_unstaged(&test_repo.repo, &c1_oid.to_string(), "file1.txt")
+        super::fold_commit_file_to_unstaged(&test_repo.repo, &c1_oid.to_string(), "file1.txt", &[])
             .expect_err("the diff must not merge back");
     assert!(
         err.to_string().contains("rolled back"),
@@ -1648,6 +1668,7 @@ fn fold_commit_file_to_unstaged_no_changes_fails() {
         &test_repo.repo,
         &head_oid.to_string(),
         "nonexistent.txt",
+        &[],
     );
 
     assert!(result.is_err());
@@ -1678,6 +1699,7 @@ fn fold_commit_file_to_commit() {
         &source_oid.to_string(),
         "file1.txt",
         &target_oid.to_string(),
+        &[],
     );
 
     assert!(
@@ -1715,6 +1737,7 @@ fn fold_commit_file_to_commit_submodule() {
         &source_oid.to_string(),
         "Data",
         &target_oid.to_string(),
+        &[],
     )
     .unwrap();
 
@@ -1750,6 +1773,7 @@ fn fold_commit_file_to_commit_submodule_source_newer() {
         &source_oid.to_string(),
         "Data",
         &target_oid.to_string(),
+        &[],
     )
     .unwrap();
 
@@ -1794,6 +1818,7 @@ fn fold_commit_file_to_commit_rollback_keeps_uncommitted_changes() {
         &source.to_string(),
         "f.txt",
         &target.to_string(),
+        &[],
     )
     .expect_err("the file's diff must not apply onto the target");
 
@@ -1839,6 +1864,7 @@ fn fold_commit_file_to_commit_forward_rollback_keeps_uncommitted_changes() {
         &source.to_string(),
         "f.txt",
         &target.to_string(),
+        &[],
     )
     .expect_err("the file's diff must not apply onto the target");
 
@@ -1861,6 +1887,7 @@ fn fold_commit_file_to_commit_same_commit_fails() {
         &c1_oid.to_string(),
         "file1.txt",
         &c1_oid.to_string(),
+        &[],
     );
 
     assert!(result.is_err());
@@ -1893,6 +1920,7 @@ fn fold_commit_file_to_older_commit() {
         &c2_oid.to_string(),
         "file_a.txt",
         &c1_oid.to_string(),
+        &[],
     );
 
     assert!(
@@ -1957,7 +1985,7 @@ fn fold_commit_file_to_unstaged_stacked_branch() {
     let fa_tip = test_repo.get_branch_target("feature-a");
 
     let result =
-        super::fold_commit_file_to_unstaged(&test_repo.repo, &fa_tip.to_string(), "fa1.txt");
+        super::fold_commit_file_to_unstaged(&test_repo.repo, &fa_tip.to_string(), "fa1.txt", &[]);
 
     assert!(
         result.is_ok(),
@@ -2015,6 +2043,7 @@ fn fold_commit_file_to_commit_stacked_branch() {
         &b1_oid.to_string(),
         "fb1.txt",
         &a1_oid.to_string(),
+        &[],
     );
 
     assert!(
@@ -2104,6 +2133,7 @@ fn fold_commit_file_to_commit_woven_branches() {
         &foo3_tip.to_string(),
         "feature7",
         &foo2_tip.to_string(),
+        &[],
     );
 
     assert!(
@@ -2478,6 +2508,7 @@ fn fold_rolls_back_when_the_rebase_refuses_to_start() {
         &["a1.txt".to_string()],
         &a_oid.to_string(),
         false,
+        &[],
     );
 
     assert!(
@@ -2548,6 +2579,7 @@ fn fold_into_an_out_of_scope_commit_leaves_the_repo_alone() {
         &["l1.txt".to_string()],
         &out_of_scope.to_string(),
         false,
+        &[],
     );
 
     assert!(result.is_err(), "an out-of-scope target must be refused");
@@ -2810,6 +2842,7 @@ fn fold_moves_several_commits_to_a_branch() {
             None,
             HunkArgs::default(),
             vec![m2.to_string(), m1.to_string(), "feature-a".to_string()],
+            vec![],
             &crate::core::graph::Theme::dark(),
         )
     });
@@ -2862,7 +2895,7 @@ fn fold_staged_into_head() {
 
     let head_oid = test_repo.head_oid();
 
-    let result = super::run_staged(&test_repo.repo, &head_oid.to_string());
+    let result = super::run_staged(&test_repo.repo, &head_oid.to_string(), &[]);
     assert!(result.is_ok(), "run_staged failed: {:?}", result);
 
     assert_eq!(test_repo.get_message(0), "Second commit");
@@ -2877,7 +2910,7 @@ fn fold_staged_nothing_staged_fails() {
 
     let head_oid = test_repo.head_oid();
 
-    let result = super::run_staged(&test_repo.repo, &head_oid.to_string());
+    let result = super::run_staged(&test_repo.repo, &head_oid.to_string(), &[]);
     assert!(result.is_err());
     assert!(
         result
@@ -2900,7 +2933,7 @@ fn fold_staged_only_uses_staged_not_unstaged() {
 
     let head_oid = test_repo.head_oid();
 
-    let result = super::run_staged(&test_repo.repo, &head_oid.to_string());
+    let result = super::run_staged(&test_repo.repo, &head_oid.to_string(), &[]);
     assert!(result.is_ok(), "run_staged failed: {:?}", result);
 
     // Only file1.txt should be in the commit; file2.txt should remain as unstaged
@@ -2919,7 +2952,7 @@ fn fold_staged_non_commit_target_fails() {
     test_repo.stage_files(&["file1.txt"]);
 
     // Passing a branch name when only Commit is accepted should fail
-    let result = test_repo.in_dir(|| super::run_staged(&test_repo.repo, "feature-a"));
+    let result = test_repo.in_dir(|| super::run_staged(&test_repo.repo, "feature-a", &[]));
     assert!(result.is_err(), "should have failed");
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -2962,6 +2995,7 @@ fn fold_abort_preserves_working_state() {
         &["shared.txt".to_string()],
         &a_oid.to_string(),
         false,
+        &[],
     );
     assert!(
         result.is_ok(),
@@ -3017,6 +3051,7 @@ fn fold_unstaged_deletion_into_head() {
         &["file1.txt".to_string()],
         &head_oid.to_string(),
         false,
+        &[],
     );
 
     assert!(result.is_ok(), "fold of a deletion failed: {:?}", result);
@@ -3040,6 +3075,7 @@ fn fold_staged_deletion_into_head() {
         &["file1.txt".to_string()],
         &head_oid.to_string(),
         false,
+        &[],
     );
 
     assert!(
@@ -3067,6 +3103,7 @@ fn fold_staged_deletion_into_non_head_commit() {
         &["file1.txt".to_string()],
         &c2_oid.to_string(),
         false,
+        &[],
     );
 
     assert!(
@@ -3159,7 +3196,7 @@ fn apply_and_amend_uncommits_a_picked_submodule() {
     }];
     let gitlinks = super::picked_whole_files(&workdir, &head, &selections).unwrap();
 
-    super::apply_and_amend(&workdir, &selections, "", &gitlinks, true).unwrap();
+    super::apply_and_amend(&workdir, &selections, "", &gitlinks, true, &[]).unwrap();
 
     let new_head = test_repo.head_oid();
     assert_eq!(test_repo.commit_file_paths(new_head), ["other.txt"]);
@@ -3300,7 +3337,7 @@ fn fold_file_out_of_a_commit_refuses_when_the_replay_is_dropped() {
     let head_before = t.head_oid();
     let alpha_before = t.get_branch_target("alpha");
 
-    let err = super::fold_commit_file_to_unstaged(&t.repo, &target.to_string(), "one.txt")
+    let err = super::fold_commit_file_to_unstaged(&t.repo, &target.to_string(), "one.txt", &[])
         .unwrap_err()
         .to_string();
 
@@ -3316,8 +3353,14 @@ fn fold_between_commits_walks_past_a_redundant_one() {
     // commit that replays empty sits between them, on the continue.
     let (t, older, newer) = crate::core::test_helpers::repo_with_a_redundant_commit_between();
 
-    super::fold_commit_file_to_commit(&t.repo, &older.to_string(), "moved.txt", &newer.to_string())
-        .unwrap();
+    super::fold_commit_file_to_commit(
+        &t.repo,
+        &older.to_string(),
+        "moved.txt",
+        &newer.to_string(),
+        &[],
+    )
+    .unwrap();
 
     assert!(!crate::git::rebase_is_in_progress(t.repo.path()));
     assert!(!t.commit_messages().contains(&"branch change".to_string()));
@@ -3401,6 +3444,7 @@ fn fold_files_into_commit_refuses_when_the_target_replays_empty() {
         &["three.txt".to_string()],
         &redundant.to_string(),
         false,
+        &[],
     )
     .unwrap_err()
     .to_string();
@@ -3497,6 +3541,7 @@ fn fold_patch_between_commits_names_the_source_that_survives_phase_two() {
         &target.to_string(),
         "Target",
         &selections,
+        &[],
     )
     .unwrap();
 
@@ -3682,7 +3727,7 @@ fn a_picked_deletion_leaves_the_source_commit() {
     let picked = picked_whole_files(&test_repo, head, &selections);
     let patch = super::build_selected_patch(&selections);
 
-    super::apply_and_amend(&workdir, &selections, &patch, &picked, true).unwrap();
+    super::apply_and_amend(&workdir, &selections, &patch, &picked, true, &[]).unwrap();
 
     let amended = crate::git::diff_commit_name_status(&workdir, "HEAD").unwrap();
     assert!(amended.is_empty(), "{amended:?}");
@@ -3712,7 +3757,7 @@ fn a_picked_deletion_of_an_ignored_file_still_moves() {
     let picked = picked_whole_files(&test_repo, head, &selections);
     let patch = super::build_selected_patch(&selections);
 
-    super::apply_and_amend(&workdir, &selections, &patch, &picked, true).unwrap();
+    super::apply_and_amend(&workdir, &selections, &patch, &picked, true, &[]).unwrap();
 
     assert_eq!(test_repo.read_file("gone.txt"), "Add gone");
     let amended = crate::git::diff_commit_name_status(&workdir, "HEAD").unwrap();
@@ -3742,7 +3787,7 @@ fn a_picked_deletion_of_a_binary_file_still_moves() {
     assert!(matches!(picked[0].kind, super::WholeFileKind::Deletion));
     let patch = super::build_selected_patch(&selections);
 
-    super::apply_and_amend(&workdir, &selections, &patch, &picked, true).unwrap();
+    super::apply_and_amend(&workdir, &selections, &patch, &picked, true, &[]).unwrap();
 
     assert_eq!(test_repo.read_file("blob.bin"), "\u{0}\u{1}old\u{0}");
     let amended = crate::git::diff_commit_name_status(&workdir, "HEAD").unwrap();
@@ -3770,7 +3815,7 @@ fn a_picked_deletion_of_an_empty_file_still_moves() {
     let picked = picked_whole_files(&test_repo, head, &selections);
     let patch = super::build_selected_patch(&selections);
 
-    super::apply_and_amend(&workdir, &selections, &patch, &picked, true).unwrap();
+    super::apply_and_amend(&workdir, &selections, &patch, &picked, true, &[]).unwrap();
 
     assert_eq!(test_repo.read_file("empty.txt"), "");
     let amended = crate::git::diff_commit_name_status(&workdir, "HEAD").unwrap();
@@ -3792,7 +3837,7 @@ fn a_picked_deletion_enters_the_target_commit() {
     // Stand where the rebase pauses on the target: one commit below the source.
     test_repo.reset_hard(test_repo.get_oid(1));
 
-    super::apply_and_amend(&workdir, &selections, &patch, &picked, false).unwrap();
+    super::apply_and_amend(&workdir, &selections, &patch, &picked, false, &[]).unwrap();
 
     let amended = crate::git::diff_commit_name_status(&workdir, "HEAD").unwrap();
     assert!(
@@ -3813,7 +3858,7 @@ fn a_picked_deletion_uncommits_as_an_unstaged_deletion() {
     let picked = picked_whole_files(&test_repo, head, &selections);
     let patch = super::build_selected_patch(&selections);
 
-    super::apply_and_amend(&workdir, &selections, &patch, &picked, true).unwrap();
+    super::apply_and_amend(&workdir, &selections, &patch, &picked, true, &[]).unwrap();
     super::restore_to_worktree(&workdir, &patch, &picked).unwrap();
 
     assert!(!workdir.join("gone.txt").exists());
@@ -3909,7 +3954,7 @@ fn a_picked_deletion_with_a_glob_in_its_name_moves_alone() {
     let patch = super::build_selected_patch(&selections);
     assert!(patch.is_empty(), "only the deletion was picked: {patch}");
 
-    super::apply_and_amend(&workdir, &selections, &patch, &picked, true).unwrap();
+    super::apply_and_amend(&workdir, &selections, &patch, &picked, true, &[]).unwrap();
 
     // The deletion left the commit; the change nobody picked stayed in it.
     let amended = crate::git::diff_commit_name_status(&workdir, "HEAD").unwrap();
@@ -3952,7 +3997,7 @@ fn a_picked_submodule_removal_stays_a_gitlink() {
         super::WholeFileKind::Gitlink { removed: true }
     ));
 
-    super::apply_and_amend(&workdir, &selections, "", &picked, true).unwrap();
+    super::apply_and_amend(&workdir, &selections, "", &picked, true, &[]).unwrap();
 
     assert_eq!(test_repo.submodule_oid(test_repo.head_oid(), "Data"), first);
     assert!(workdir.join("Data").exists(), "the checkout stays on disk");
@@ -4170,7 +4215,7 @@ fn fold_commit_file_to_unstaged_keeps_staging_on_success() {
     t.commit("Third", "third.txt");
     let before = stage_a_mix(&t, "first.txt");
 
-    super::fold_commit_file_to_unstaged(&t.repo, &c2.to_string(), "a.txt").unwrap();
+    super::fold_commit_file_to_unstaged(&t.repo, &c2.to_string(), "a.txt", &[]).unwrap();
 
     // `a.txt` leaves the commit and lands untracked; the staged set is what
     // has to be unchanged.
@@ -4188,7 +4233,392 @@ fn fold_commit_file_to_commit_keeps_staging_on_success() {
     t.commit("Third", "third.txt");
     let before = stage_a_mix(&t, "first.txt");
 
-    super::fold_commit_file_to_commit(&t.repo, &c2.to_string(), "a.txt", &c1.to_string()).unwrap();
+    super::fold_commit_file_to_commit(&t.repo, &c2.to_string(), "a.txt", &c1.to_string(), &[])
+        .unwrap();
 
     assert_eq!(t.status_porcelain(), before);
+}
+
+// ── Forwarded git arguments (Spec 021) ──────────────────────────────────
+
+/// The fixup path squashes whatever sits on HEAD, so it has to know that git
+/// put a commit there; `--amend` would have replaced the user's own instead.
+#[test]
+fn committed_onto_sees_what_git_did() {
+    let t = TestRepo::new();
+    let base = t.commit("Base", "base.txt");
+    assert!(!super::committed_onto(&t.workdir(), base));
+
+    let child = t.commit("Child", "child.txt");
+    assert!(super::committed_onto(&t.workdir(), base));
+    assert!(!super::committed_onto(&t.workdir(), child));
+}
+
+/// The fixup path's last resort, reachable only through an argument loom does
+/// not know: git amended HEAD instead of committing on top of it, and the
+/// squash would have taken the user's own commit into the target.
+#[test]
+fn an_amend_that_replaced_head_is_taken_back() {
+    let t = TestRepo::new();
+    t.commit("First", "file1.txt");
+    t.commit("Second", "other.txt");
+    t.write_file("other.txt", "staged by the user");
+    t.stage_files(&["other.txt"]);
+    t.write_file("file1.txt", "folded");
+
+    let workdir = t.workdir();
+    let saved =
+        crate::core::staging::save_and_unstage_other_staged(&t.repo, &workdir, &["file1.txt"])
+            .unwrap();
+    crate::git::stage_files(&workdir, &["file1.txt"]).unwrap();
+    let head = t.head_oid();
+    crate::git::run_git(&workdir, &["commit", "--amend", "--no-edit"]).unwrap();
+    assert_ne!(t.head_oid(), head, "the amend should have moved HEAD");
+
+    super::undo_commit_attempt(&workdir, head, &["file1.txt"], &saved);
+
+    assert_eq!(t.head_oid(), head);
+    assert_eq!(t.get_message(0), "Second");
+    assert_eq!(t.read_file("file1.txt"), "folded");
+    let status = t.status_porcelain();
+    assert!(status.contains(" M file1.txt"), "{status}");
+    assert!(status.contains("M  other.txt"), "{status}");
+}
+
+/// The `-p` amend happens at a rebase pause, where the forwarded arguments have
+/// to arrive too.
+#[cfg(unix)]
+#[test]
+fn a_patch_fold_forwards_to_the_amend_at_the_rebase_pause() {
+    let body = "1\n2\n3\n4\n5\n6\n7\n8\n";
+    let select_moved_hunks = |t: &TestRepo, source: git2::Oid| {
+        let mut selections =
+            crate::core::staging::collect_commit_hunks(&t.workdir(), &source.to_string(), &[])
+                .unwrap();
+        for file in &mut selections {
+            for hunk in &mut file.hunks {
+                hunk.selected = true;
+            }
+        }
+        selections
+    };
+    let build = || {
+        let t = TestRepo::new_with_remote();
+        t.commit_multi(&[("f.txt", body)], "Base");
+        let target = t.commit_multi(&[("t.txt", "target\n")], "Target");
+        let source = t.commit_multi(&[("f.txt", &body.replace("2\n", "TWO\n"))], "Source");
+        t.install_hook("pre-commit", "exit 1\n");
+        (t, target, source)
+    };
+
+    let (t, target, source) = build();
+    let selections = select_moved_hunks(&t, source);
+    assert!(
+        super::fold_selected_hunks_to_commit(
+            &t.repo,
+            &t.workdir(),
+            &source.to_string(),
+            &target.to_string(),
+            "Target",
+            &selections,
+            &[],
+        )
+        .is_err(),
+        "the hook should block the amend"
+    );
+
+    let (t, target, source) = build();
+    let selections = select_moved_hunks(&t, source);
+    let (_, new_target) = super::fold_selected_hunks_to_commit(
+        &t.repo,
+        &t.workdir(),
+        &source.to_string(),
+        &target.to_string(),
+        "Target",
+        &selections,
+        &["--no-verify"],
+    )
+    .unwrap();
+
+    assert!(t.commit_has_file(git2::Oid::from_str(&new_target).unwrap(), "f.txt"));
+    assert_eq!(t.commit_messages()[..3], ["Source", "Target", "Base"]);
+}
+
+/// Moving a file between commits amends at a rebase pause, which is a third
+/// place the hooks run and the forwarded arguments have to reach.
+#[cfg(unix)]
+#[test]
+fn a_commit_file_fold_forwards_to_its_amend() {
+    let build = || {
+        let t = TestRepo::new_with_remote();
+        t.write_file("file1.txt", "content1");
+        t.write_file("file2.txt", "content2");
+        t.stage_files(&["file1.txt", "file2.txt"]);
+        t.commit_staged("Source commit");
+        let source = t.head_oid();
+        t.write_file("file3.txt", "content3");
+        t.stage_files(&["file3.txt"]);
+        t.commit_staged("Target commit");
+        let target = t.head_oid();
+        t.install_hook("pre-commit", "exit 1\n");
+        (t, source, target)
+    };
+
+    let (t, source, target) = build();
+    assert!(
+        super::fold_commit_file_to_commit(
+            &t.repo,
+            &source.to_string(),
+            "file1.txt",
+            &target.to_string(),
+            &[],
+        )
+        .is_err(),
+        "the hook should block the amend"
+    );
+
+    let (t, source, target) = build();
+    super::fold_commit_file_to_commit(
+        &t.repo,
+        &source.to_string(),
+        "file1.txt",
+        &target.to_string(),
+        &["--no-verify"],
+    )
+    .unwrap();
+
+    assert_eq!(t.commit_messages()[..2], ["Target commit", "Source commit"]);
+    assert!(t.commit_has_file(t.head_oid(), "file1.txt"));
+    assert_eq!(t.read_file("file1.txt"), "content1");
+}
+
+/// A forwarded argument must not cost the commits above the target: the fixup
+/// path squashes, and a squash that starts from the wrong commit eats one.
+#[cfg(unix)]
+#[test]
+fn a_forwarded_fold_into_an_older_commit_keeps_the_commits_above_it() {
+    let t = TestRepo::new_with_remote();
+    t.commit("Base", "base.txt");
+    let first = t.commit("First", "f1.txt");
+    t.commit("Second", "f2.txt");
+    t.install_hook("pre-commit", "exit 1\n");
+    t.write_file("f1.txt", "folded");
+
+    super::fold_files_into_commit(
+        &t.repo,
+        &["f1.txt".to_string()],
+        &first.to_string(),
+        false,
+        &["--no-verify"],
+    )
+    .unwrap();
+
+    assert_eq!(t.commit_messages()[..3], ["Second", "First", "Base"]);
+    assert_eq!(t.read_file("f1.txt"), "folded");
+}
+
+/// `--amend` on the fixup path makes git rewrite the user's own HEAD instead
+/// of committing the fixup; the squash would then have eaten that commit.
+#[test]
+fn a_forwarded_amend_on_the_fixup_path_rolls_back() {
+    let t = TestRepo::new_with_remote();
+    t.commit("Base", "base.txt");
+    let first = t.commit("First", "f1.txt");
+    t.commit("Second", "f2.txt");
+    let before = stage_a_mix(&t, "base.txt");
+    t.write_file("f1.txt", "folded");
+
+    let err = super::fold_files_into_commit(
+        &t.repo,
+        &["f1.txt".to_string()],
+        &first.to_string(),
+        false,
+        &["--amend"],
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string().contains("left no new commit on HEAD"),
+        "{err}"
+    );
+    assert_eq!(t.commit_messages()[..3], ["Second", "First", "Base"]);
+    assert_eq!(t.read_file("f1.txt"), "folded");
+    let status = t.status_porcelain();
+    assert!(status.contains(" M f1.txt"), "{status}");
+    assert_eq!(
+        status.lines().filter(|l| !l.contains("f1.txt")).count(),
+        before.lines().count(),
+        "the user's own staged set is back: {status}"
+    );
+}
+
+/// A dry run prints and exits 0 without committing, so the amend has to catch
+/// it before the fold reports success.
+#[test]
+fn a_forwarded_dry_run_on_the_amend_rolls_back() {
+    let t = TestRepo::new_with_remote();
+    t.commit("Base", "base.txt");
+    let head = t.commit("Only", "f1.txt");
+    let before = stage_a_mix(&t, "base.txt");
+    t.write_file("f1.txt", "folded");
+
+    let err = super::fold_files_into_commit(
+        &t.repo,
+        &["f1.txt".to_string()],
+        &head.to_string(),
+        false,
+        &["--dry-run"],
+    )
+    .unwrap_err();
+
+    assert!(err.to_string().contains("nothing was amended"), "{err}");
+    assert_eq!(t.head_oid(), head);
+    assert_eq!(t.read_file("f1.txt"), "folded");
+    assert_eq!(t.status_porcelain(), format!("{before} M f1.txt\n"));
+}
+
+/// The fixup path's `git commit` can fail outright — a refusing `pre-commit`
+/// hook — and must hand the index back exactly as it found it.
+#[cfg(unix)]
+#[test]
+fn a_refused_fixup_commit_gives_the_index_back() {
+    let t = TestRepo::new_with_remote();
+    t.commit("Base", "base.txt");
+    let first = t.commit("First", "f1.txt");
+    t.commit("Second", "f2.txt");
+    let before = stage_a_mix(&t, "base.txt");
+    let head = t.head_oid();
+    t.write_file("f1.txt", "folded");
+    t.install_hook("pre-commit", "exit 1\n");
+
+    assert!(
+        super::fold_files_into_commit(
+            &t.repo,
+            &["f1.txt".to_string()],
+            &first.to_string(),
+            false,
+            &[],
+        )
+        .is_err()
+    );
+
+    assert_eq!(t.head_oid(), head);
+    assert_eq!(t.commit_messages()[..3], ["Second", "First", "Base"]);
+    assert_eq!(t.status_porcelain(), format!("{before} M f1.txt\n"));
+}
+
+/// Every whole-commit form rejects the separator, and each reaches the check
+/// from a different arm of `run` (Spec 021).
+#[test]
+fn every_whole_commit_form_rejects_the_separator() {
+    let t = TestRepo::new_with_remote();
+    t.commit("First", "f1.txt");
+    let first = t.head_oid().to_string();
+    t.commit("Second", "f2.txt");
+    let second = t.head_oid().to_string();
+    t.create_branch_at("other", &first);
+
+    let cases: [(bool, Option<super::Anchor>, Vec<String>, &str); 5] = [
+        (
+            false,
+            Some(super::Anchor::Above(first.clone())),
+            vec![second.clone()],
+            "moving commits next to another",
+        ),
+        (
+            true,
+            None,
+            vec![second.clone(), "brand-new".into()],
+            "moving commits to a new branch",
+        ),
+        (
+            false,
+            None,
+            vec![second.clone(), first.clone()],
+            "folding a commit into another",
+        ),
+        (
+            false,
+            None,
+            vec![second.clone(), "other".into()],
+            "moving commits to a branch",
+        ),
+        (
+            false,
+            None,
+            vec![second.clone(), "zz".into()],
+            "uncommitting a commit",
+        ),
+    ];
+
+    for (create, anchor, args, what) in cases {
+        let result = t.in_dir(|| {
+            super::run(
+                create,
+                false,
+                anchor.clone(),
+                HunkArgs::default(),
+                args.clone(),
+                vec!["--no-verify".into()],
+                &crate::core::graph::Theme::dark(),
+            )
+        });
+        let err = result.expect_err(what).to_string();
+        assert!(err.contains(what), "{what}: {err}");
+        assert!(
+            err.contains("takes no arguments after `--`"),
+            "{what}: {err}"
+        );
+    }
+
+    assert_eq!(t.commit_messages()[..2], ["Second", "First"]);
+}
+
+/// Moving a file between commits amends both, so a forwarded message source
+/// rewords both. Pinned because the docs promise exactly this (Spec 021).
+#[test]
+fn a_forwarded_message_rewords_both_commits_of_a_move() {
+    let t = TestRepo::new_with_remote();
+    t.commit("Base", "base.txt");
+    let target = t.commit("Target", "t.txt");
+    let source = t.commit_multi(&[("moved.txt", "m"), ("stays.txt", "s")], "Source");
+
+    super::fold_commit_file_to_commit(
+        &t.repo,
+        &source.to_string(),
+        "moved.txt",
+        &target.to_string(),
+        &["-m", "hijacked"],
+    )
+    .unwrap();
+
+    assert_eq!(t.commit_messages()[..3], ["hijacked", "hijacked", "Base"]);
+}
+
+/// `--only` with no pathspec commits none of the index, and `--allow-empty`
+/// lets the result through, so git makes a `fixup!` child holding nothing.
+/// Squashing that rewrites the target with nothing in it and reports success.
+#[test]
+fn an_empty_fixup_commit_is_refused_before_the_squash() {
+    let t = TestRepo::new_with_remote();
+    t.commit("Base", "base.txt");
+    let first = t.commit("First", "f1.txt");
+    t.commit("Second", "f2.txt");
+    let before = stage_a_mix(&t, "base.txt");
+    let head = t.head_oid();
+    t.write_file("f1.txt", "folded");
+
+    let err = super::fold_files_into_commit(
+        &t.repo,
+        &["f1.txt".to_string()],
+        &first.to_string(),
+        false,
+        &["--only", "--allow-empty"],
+    )
+    .unwrap_err();
+
+    assert!(err.to_string().contains("empty `fixup!` commit"), "{err}");
+    assert_eq!(t.head_oid(), head, "nothing was rewritten");
+    assert_eq!(t.commit_messages()[..3], ["Second", "First", "Base"]);
+    assert_eq!(t.status_porcelain(), format!("{before} M f1.txt\n"));
 }

@@ -1039,6 +1039,101 @@ assert_eq "$(git -C "$WORK" rev-parse inner)" "$base_hash" "move_inner_parked"
 assert_eq "$(git -C "$WORK" log --format=%s -1 other)" "Inner I1" "move_inner_on_other"
 assert_eq "$(git -C "$WORK" log --format=%s -1 outer)" "Outer O1" "move_inner_outer_kept"
 
+# ── GIT ARGUMENT FORWARDING ───────────────────────────────────────────────────
+
+# The global config may point core.hooksPath elsewhere; aim it back at the repo.
+install_failing_pre_commit() {
+  mkdir -p "$WORK/.git/hooks"
+  git -C "$WORK" config core.hooksPath "$WORK/.git/hooks"
+  printf '#!/bin/sh\nexit 1\n' > "$WORK/.git/hooks/pre-commit"
+  chmod +x "$WORK/.git/hooks/pre-commit"
+}
+
+describe "amend: a pre-commit hook is skipped with -- --no-verify"
+setup_repo_with_remote
+commit_file "Hooked base" "hooked.txt"
+install_failing_pre_commit
+write_file "hooked.txt" "amended"
+gl_capture fold hooked.txt HEAD
+assert_exit_fail "$CODE" "fold_hook_blocks"
+gl_capture fold hooked.txt HEAD -- --no-verify
+assert_exit_ok "$CODE" "fold_no_verify_ok"
+assert_eq "amended" "$(git -C "$WORK" show HEAD:hooked.txt)" "fold_no_verify_amended"
+
+describe "fixup: the hook on the non-HEAD path is skipped too"
+setup_repo_with_remote
+commit_file "H1" "h1.txt"
+h1_hash=$(head_hash)
+commit_file "H2" "h2.txt"
+install_failing_pre_commit
+write_file "h1.txt" "folded"
+gl_capture fold h1.txt "$h1_hash"
+assert_exit_fail "$CODE" "fold_fixup_hook_blocks"
+gl_capture fold h1.txt "$h1_hash" -- --no-verify
+assert_exit_ok "$CODE" "fold_fixup_no_verify_ok"
+assert_eq "folded" "$(git -C "$WORK" show HEAD~1:h1.txt)" "fold_fixup_no_verify_content"
+assert_log_contains "H2" "fold_fixup_no_verify_keeps_the_commit_above"
+
+describe "a fold that only rebases takes no arguments after --"
+setup_repo_with_remote
+commit_file "R1" "r1.txt"
+r1_hash=$(head_hash)
+commit_file "R2" "r2.txt"
+r2_hash=$(head_hash)
+gl_capture fold "$r2_hash" "$r1_hash" -- --no-verify
+assert_exit_fail "$CODE" "fold_rebase_only_fail"
+assert_contains "$OUT" 'runs no git commit' "fold_rebase_only_msg"
+
+describe "a forwarded --amend on the fixup path rolls back"
+setup_repo_with_remote
+commit_file "P1" "p1.txt"
+p1_hash=$(head_hash)
+commit_file "P2" "p2.txt"
+write_file "p1.txt" "changed"
+gl_capture fold p1.txt "$p1_hash" -- --amend
+assert_exit_fail "$CODE" "fold_amend_fail"
+assert_contains "$OUT" "left no new commit on HEAD" "fold_amend_msg"
+assert_log_contains "P2" "fold_amend_history_intact"
+assert_eq "changed" "$(cat "$WORK/p1.txt")" "fold_amend_change_kept"
+
+describe "a forwarded --dry-run leaves the fixup path nothing to squash"
+setup_repo_with_remote
+commit_file "D1" "d1.txt"
+d1_hash=$(head_hash)
+commit_file "D2" "d2.txt"
+write_file "d1.txt" "changed"
+gl_capture fold d1.txt "$d1_hash" -- --dry-run
+assert_exit_fail "$CODE" "fold_fixup_dry_run_fail"
+assert_contains "$OUT" "left no new commit on HEAD" "fold_fixup_dry_run_msg"
+assert_log_contains "D2" "fold_fixup_dry_run_history_intact"
+assert_eq "changed" "$(cat "$WORK/d1.txt")" "fold_fixup_dry_run_change_kept"
+
+describe "an empty fixup commit is refused before the squash"
+setup_repo_with_remote
+commit_file "E1" "e1.txt"
+e1_hash=$(head_hash)
+commit_file "E2" "e2.txt"
+write_file "e1.txt" "changed"
+gl_capture fold e1.txt "$e1_hash" -- --only --allow-empty
+assert_exit_fail "$CODE" "fold_empty_fixup_fail"
+assert_contains "$OUT" "empty" "fold_empty_fixup_msg"
+assert_log_contains "E2" "fold_empty_fixup_history_intact"
+assert_eq "changed" "$(cat "$WORK/e1.txt")" "fold_empty_fixup_change_kept"
+
+describe "a forwarded --dry-run leaves the amend to roll back"
+setup_repo_with_remote
+commit_file "Dry base" "dry.txt"
+write_file "dry.txt" "changed"
+gl_capture fold dry.txt HEAD -- --dry-run
+assert_exit_fail "$CODE" "fold_dry_run_fail"
+assert_contains "$OUT" "nothing was amended" "fold_dry_run_msg"
+
+describe "a status format is a dry run, and rolls back like one"
+gl_capture fold dry.txt HEAD -- --porcelain
+assert_exit_fail "$CODE" "fold_porcelain_fail"
+assert_contains "$OUT" "nothing was amended" "fold_porcelain_msg"
+assert_eq "changed" "$(cat "$WORK/dry.txt")" "fold_porcelain_change_kept"
+
 # ── CONTINUE / ABORT ──────────────────────────────────────────────────────────
 # Shared conflict setup: C1 changes A→B, C2 changes B→C.
 # Uncommitting C1 (fold zz) drops it from history, forcing C2 to cherry-pick

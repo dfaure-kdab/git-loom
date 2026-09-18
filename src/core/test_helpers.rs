@@ -608,6 +608,20 @@ impl TestRepo {
         crate::git::run_git(self.workdir().as_path(), &["config", key, value]).unwrap();
     }
 
+    /// Install an executable git hook and point `core.hooksPath` at this repo,
+    /// which the user's own config may have aimed elsewhere.
+    #[cfg(unix)]
+    pub fn install_hook(&self, name: &str, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let hooks = self.repo.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join(name);
+        std::fs::write(&hook, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        self.set_config("core.hooksPath", hooks.to_str().unwrap());
+    }
+
     /// Get porcelain status output.
     pub fn status_porcelain(&self) -> String {
         crate::git::run_git_stdout(self.workdir().as_path(), &["status", "--porcelain"]).unwrap()
