@@ -82,4 +82,5 @@ See [`continue`](continue.md) and [`abort`](abort.md) for details.
 
 - Both commits must be woven into the current integration branch
 - Both commits must be in the same sequence (same branch section or both on the integration line)
-- Uncommitted working tree changes are preserved automatically
+- Uncommitted working tree changes are preserved automatically, and staged
+  changes come back staged

@@ -21,7 +21,6 @@ enum FoldVariant {
     FilesIntoCommit {
         original_commit_hash: String,
         files_count: usize,
-        saved_staged: String,
     },
     CommitIntoCommit {
         source_hash: String,
@@ -322,25 +321,6 @@ fn ordered_topologically(
     Ok(newest_first)
 }
 
-/// Re-stage what the abort brought back as unstaged.
-///
-/// `git rebase --abort` replays its autostash into the working tree, so the
-/// content returns but the staging mostly does not. The snapshot is a
-/// HEAD-to-index diff, so the index is first reset back to HEAD; the working
-/// tree is untouched by that, and a patch that still will not apply is saved
-/// aside.
-fn restage_after_abort(workdir: &Path, staged: &str) {
-    if staged.is_empty() {
-        return;
-    }
-    let restored =
-        git::reset_mixed(workdir, "HEAD").and_then(|()| git::apply_cached_patch(workdir, staged));
-    if let Err(e) = restored {
-        msg::warn(&format!("could not re-stage your staged changes: {e}"));
-        git::save_or_warn(workdir, "unrestored-staged", staged, true);
-    }
-}
-
 /// Move `commit_hashes` to `branch_name` and report the result.
 ///
 /// When `base_hash` is `Some`, the branch is created at that base first (and
@@ -358,14 +338,16 @@ fn move_commits_and_report(
         git::branch_create(workdir, branch_name, base)?;
     }
 
-    // The rebase autostashes, and the abort below replays that into the
-    // working tree only — staged changes would come back unstaged.
+    // Restored whichever way the rebase ends (Spec 014).
     let saved_staged = git::diff_cached(workdir)?;
 
     let parked = match move_commits_to_branch(repo, commit_hashes, branch_name) {
-        Ok((RebaseOutcome::Completed, parked)) => parked,
+        Ok((RebaseOutcome::Completed, parked)) => {
+            git::restore_staged_after_rebase(workdir, &saved_staged);
+            parked
+        }
         Ok((RebaseOutcome::Stopped | RebaseOutcome::Paused, _)) => {
-            let err = abort_and_restage(workdir, repo, &saved_staged);
+            let err = abort_and_restage(workdir, &saved_staged);
             // The branch may be the checked-out ref while a failed abort
             // leaves the rebase on disk.
             if created && !git::rebase_is_in_progress(repo.path()) {
@@ -375,11 +357,9 @@ fn move_commits_and_report(
         }
         Err(e) => {
             // The refusal aborts a rebase that has already autostashed, and
-            // that replay comes back unstaged — same as the branch above. A
-            // pre-flight refusal never touched the index, so it is left alone.
-            if !git::rebase_never_started(&e) {
-                restage_or_park(workdir, repo.path(), &saved_staged);
-            }
+            // that replay comes back unstaged — same as the branch above. The
+            // helper leaves a pre-flight refusal's index alone on its own.
+            git::restore_or_park_after_abort(workdir, &saved_staged, &e);
             // Same guard as the branch above: the branch may be the checked-out
             // ref while a failed abort leaves the rebase on disk.
             if created && !git::rebase_is_in_progress(repo.path()) {
@@ -422,21 +402,10 @@ fn move_commits_and_report(
 /// Only once the rebase is really gone is the index ours to touch: while it
 /// is still on disk HEAD sits detached mid-pick, so the staging is parked in
 /// a patch file instead of going with the error.
-fn abort_and_restage(workdir: &Path, repo: &Repository, saved_staged: &str) -> anyhow::Error {
+fn abort_and_restage(workdir: &Path, saved_staged: &str) -> anyhow::Error {
     let err = git::abort_after_failure(workdir);
-    restage_or_park(workdir, repo.path(), saved_staged);
+    git::restore_or_park_after_abort(workdir, saved_staged, &err);
     err
-}
-
-/// Put `saved_staged` back once the rebase is over, or park it in a patch file
-/// if an abort failed and left one running: resetting the index on top of a
-/// live rebase makes the mess worse.
-fn restage_or_park(workdir: &Path, git_dir: &Path, saved_staged: &str) {
-    if git::rebase_is_in_progress(git_dir) {
-        git::save_or_warn(workdir, "unrestored-staged", saved_staged, true);
-    } else {
-        restage_after_abort(workdir, saved_staged);
-    }
 }
 
 /// `fold <commit>... --above|--below <commit>`: move commits next to another.
@@ -527,7 +496,7 @@ fn fold_commit_relative(
         command: COMMAND.to_string(),
         rollback: Rollback {
             delete_branches: vec![TRACK_BRANCH.to_string()],
-            // Same as the branch move: the autostash comes back unstaged.
+            // Restored whichever way the rebase ends (Spec 014).
             saved_staged_patch: git::diff_cached(workdir)?,
             ..Default::default()
         },
@@ -547,6 +516,7 @@ fn fold_commit_relative(
         .map_err(|e| transaction::roll_back_failed_rebase(workdir, &git_dir, &state, e))?;
     match outcome {
         RebaseOutcome::Completed => {
+            git::restore_staged_after_rebase(workdir, &state.rollback.saved_staged_patch);
             transaction::delete(&git_dir)?;
             let new_hash = git::rev_parse(workdir, TRACK_BRANCH)?;
             let _ = git::branch_delete(workdir, TRACK_BRANCH);
@@ -594,16 +564,12 @@ fn move_commits_relative_and_report(
     let base = graph.base_oid.to_string();
     let outcome = weave::run_rebase_protecting(workdir, Some(&base), &todo, &protect)
         // The refusal aborts a rebase that has already autostashed, and that
-        // replay comes back unstaged. A pre-flight refusal never touched it.
-        .inspect_err(|e| {
-            if !git::rebase_never_started(e) {
-                restage_or_park(workdir, repo.path(), &saved_staged);
-            }
-        })?;
+        // replay comes back unstaged.
+        .inspect_err(|e| git::restore_or_park_after_abort(workdir, &saved_staged, e))?;
     match outcome {
-        RebaseOutcome::Completed => {}
+        RebaseOutcome::Completed => git::restore_staged_after_rebase(workdir, &saved_staged),
         RebaseOutcome::Stopped | RebaseOutcome::Paused => {
-            return Err(abort_and_restage(workdir, repo, &saved_staged));
+            return Err(abort_and_restage(workdir, &saved_staged));
         }
     }
 
@@ -1087,18 +1053,28 @@ fn fold_selected_hunks_to_commit(
         &[target_hash],
     ) {
         let _ = git::branch_delete(workdir, TRACK_BRANCH);
-        git::restore_staged_patch(workdir, &saved_staged);
+        git::restore_loom_unstaged_after_abort(workdir, &saved_staged, &e);
         return Err(e);
     }
 
     if let Err(e) = apply_and_amend(workdir, selections, &selected_patch, &whole_files, true) {
-        return Err(git::rebase_abort_then_cleanup(workdir, e, || {
+        // Outside the cleanup closure: a failed abort skips it, and there is no
+        // `LoomState` yet for `loom abort` to find the patch in.
+        let e = git::rebase_abort_then_cleanup(workdir, e, || {
             let _ = git::branch_delete(workdir, TRACK_BRANCH);
-            git::restore_staged_patch(workdir, &saved_staged);
-        }));
+        });
+        git::restore_loom_unstaged_after_abort(workdir, &saved_staged, &e);
+        return Err(e);
     }
 
-    let phase1_source_hash = git::rev_parse(workdir, "HEAD")?;
+    let phase1_source_hash = git::rev_parse(workdir, "HEAD").map_err(|e| {
+        // Still inside the paused rebase, so the abort comes first.
+        let e = git::rebase_abort_then_cleanup(workdir, e, || {
+            let _ = git::branch_delete(workdir, TRACK_BRANCH);
+        });
+        git::restore_loom_unstaged_after_abort(workdir, &saved_staged, &e);
+        e
+    })?;
 
     // The source replays during this continue; dropping it as empty would
     // leave the hash carried into phase 2 naming someone else's commit.
@@ -1107,7 +1083,7 @@ fn fold_selected_hunks_to_commit(
         git::continue_rebase_expecting_edit(workdir, git::AfterStop::nothing().protecting(&protect))
     {
         let _ = git::branch_delete(workdir, TRACK_BRANCH);
-        git::restore_staged_patch(workdir, &saved_staged);
+        git::restore_loom_unstaged_after_abort(workdir, &saved_staged, &e);
         return Err(e);
     }
 
@@ -1178,11 +1154,8 @@ fn fold_selected_hunks_to_commit(
     // emptied, and it goes back whichever way this ends.
     let tracked = git::rev_parse(workdir, TRACK_BRANCH);
     let _ = git::branch_delete(workdir, TRACK_BRANCH);
-    let new_source_hash = tracked.inspect_err(|_| {
-        git::restore_staged_patch(workdir, &saved_staged);
-    })?;
-
-    git::restore_staged_patch(workdir, &saved_staged);
+    git::restore_staged_after_rebase(workdir, &saved_staged);
+    let new_source_hash = tracked?;
 
     Ok((new_source_hash, new_target_hash))
 }
@@ -1253,17 +1226,24 @@ fn run_patch_fold_commit_to_unstaged(
             target_oid,
             &[],
         ) {
-            git::restore_staged_patch(workdir, &saved_staged);
+            git::restore_loom_unstaged_after_abort(workdir, &saved_staged, &e);
             return Err(e);
         }
 
         if let Err(e) = apply_and_amend(workdir, &selections, &selected_patch, &whole_files, true) {
-            return Err(git::rebase_abort_then_cleanup(workdir, e, || {
-                git::restore_staged_patch(workdir, &saved_staged);
-            }));
+            // Outside the cleanup closure: a failed abort skips it, and there is
+            // no `LoomState` yet for `loom abort` to find the patch in.
+            let e = git::rebase_abort_then_cleanup(workdir, e, || {});
+            git::restore_loom_unstaged_after_abort(workdir, &saved_staged, &e);
+            return Err(e);
         }
 
-        new_hash = git::rev_parse(workdir, "HEAD")?;
+        new_hash = git::rev_parse(workdir, "HEAD").map_err(|e| {
+            // Still inside the paused rebase, so the abort comes first.
+            let e = git::rebase_abort_then_cleanup(workdir, e, || {});
+            git::restore_loom_unstaged_after_abort(workdir, &saved_staged, &e);
+            e
+        })?;
         if let Err(e) = git::continue_rebase_expecting_edit(workdir, git::AfterStop::nothing()) {
             return Err(git::rebase_abort_then_cleanup(workdir, e, || {
                 rollback_fold(workdir, &saved_head, Some(&saved_refs), &saved_worktree);
@@ -1277,7 +1257,7 @@ fn run_patch_fold_commit_to_unstaged(
         }
     }
 
-    git::restore_staged_patch(workdir, &saved_staged);
+    git::restore_staged_after_rebase(workdir, &saved_staged);
 
     let mut staged: Vec<String> = whole_files
         .iter()
@@ -1579,8 +1559,8 @@ fn fold_files_into_commit(
             // rollback: undoing a rewrite that succeeded would leave the
             // integration branch behind its own feature branches.
             Ok(FixupOutcome::Rebased) => {
+                git::restore_staged_after_rebase(workdir, &saved_staged);
                 transaction::delete(&git_dir)?;
-                git::restore_staged_patch(workdir, &saved_staged);
                 new_hash = git::rev_parse(workdir, TRACK_BRANCH)?;
                 let _ = git::branch_delete(workdir, TRACK_BRANCH);
             }
@@ -1653,10 +1633,7 @@ fn squash_fixup_into_commit(
     let fold_ctx = serde_json::to_value(FoldVariant::FilesIntoCommit {
         original_commit_hash: commit_hash.clone(),
         files_count: files.len(),
-        saved_staged: saved_staged.to_string(),
     })?;
-    // saved_staged is stored in both rollback (for `loom abort`) and context
-    // (for `loom continue` → after_continue). Both paths are required.
     let loom_state = LoomState {
         command: COMMAND.to_string(),
         rollback: Rollback {
@@ -1718,8 +1695,7 @@ fn fold_commit_into_commit(repo: &Repository, source_hash: &str, target_hash: &s
         command: COMMAND.to_string(),
         rollback: Rollback {
             delete_branches: vec![TRACK_BRANCH.to_string()],
-            // The rebase autostashes, and the abort replays that into the
-            // working tree only — staged changes would come back unstaged.
+            // Restored whichever way the rebase ends (Spec 014).
             saved_staged_patch: git::diff_cached(workdir)?,
             ..Default::default()
         },
@@ -1734,6 +1710,7 @@ fn fold_commit_into_commit(repo: &Repository, source_hash: &str, target_hash: &s
         .map_err(|e| transaction::roll_back_failed_rebase(workdir, &git_dir, &loom_state, e))?;
     match outcome {
         RebaseOutcome::Completed => {
+            git::restore_staged_after_rebase(workdir, &loom_state.rollback.saved_staged_patch);
             transaction::delete(&git_dir)?;
             let new_hash = git::rev_parse(workdir, TRACK_BRANCH)?;
             let _ = git::branch_delete(workdir, TRACK_BRANCH);
@@ -1776,9 +1753,7 @@ fn fold_commit_to_branch(repo: &Repository, commit_hash: &str, branch_name: &str
     let state = LoomState {
         command: COMMAND.to_string(),
         rollback: Rollback {
-            // `git rebase --abort` replays its autostash into the working tree
-            // only, so without this an abort hands the staged half back
-            // unstaged while reporting the original state restored.
+            // Restored whichever way the rebase ends (Spec 014).
             saved_staged_patch: git::diff_cached(workdir)?,
             ..Default::default()
         },
@@ -1795,6 +1770,7 @@ fn fold_commit_to_branch(repo: &Repository, commit_hash: &str, branch_name: &str
         .map_err(|e| transaction::roll_back_failed_rebase(workdir, &git_dir, &state, e))?;
     match outcome {
         RebaseOutcome::Completed => {
+            git::restore_staged_after_rebase(workdir, &state.rollback.saved_staged_patch);
             transaction::delete(&git_dir)?;
             let new_hash = git::rev_parse(workdir, branch_name)?;
             report_moved(workdir, commit_hash, branch_name, &new_hash, &parked);
@@ -1954,8 +1930,18 @@ fn rollback_fold(
              History is NOT where it was — check `loom` before replaying anything",
             git::short_hash(saved_head)
         ));
-        git::save_or_warn(workdir, "unrestored", &saved_worktree.worktree, false);
-        git::save_or_warn(workdir, "unrestored-staged", &saved_worktree.staged, true);
+        git::save_or_warn(
+            workdir,
+            "unrestored",
+            &saved_worktree.worktree,
+            git::Replay::Worktree,
+        );
+        git::save_or_warn(
+            workdir,
+            "unrestored-staged",
+            &saved_worktree.staged,
+            git::Replay::Cached,
+        );
         return;
     }
     if let Some(refs) = saved_refs
@@ -1967,13 +1953,23 @@ fn rollback_fold(
         && let Err(e) = git::apply_cached_patch(workdir, &saved_worktree.staged)
     {
         msg::warn(&format!("could not re-stage your staged changes: {e}"));
-        git::save_or_warn(workdir, "unrestored-staged", &saved_worktree.staged, true);
+        git::save_or_warn(
+            workdir,
+            "unrestored-staged",
+            &saved_worktree.staged,
+            git::Replay::Cached,
+        );
     }
     if !saved_worktree.worktree.is_empty()
         && let Err(e) = git::apply_patch(workdir, &saved_worktree.worktree)
     {
         msg::warn(&format!("could not restore your uncommitted changes: {e}"));
-        git::save_or_warn(workdir, "unrestored", &saved_worktree.worktree, false);
+        git::save_or_warn(
+            workdir,
+            "unrestored",
+            &saved_worktree.worktree,
+            git::Replay::Worktree,
+        );
     }
 }
 
@@ -2073,20 +2069,36 @@ fn fold_commit_file_to_unstaged(repo: &Repository, commit_hash: &str, path: &str
             &todo,
             target_oid,
             &[],
-        )?;
+        )
+        .inspect_err(|e| git::restore_or_park_after_abort(workdir, &saved_worktree.staged, e))?;
 
         if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, true) {
-            return Err(git::rebase_abort_then_cleanup(workdir, e, || {}));
+            // Outside the cleanup closure: a failed abort skips it, and there
+            // is no `LoomState` for `loom abort` to find the patch in.
+            let e = git::rebase_abort_then_cleanup(workdir, e, || {});
+            git::restore_or_park_after_abort(workdir, &saved_worktree.staged, &e);
+            return Err(e);
         }
 
-        new_hash = git::rev_parse(workdir, "HEAD")?;
+        new_hash = git::rev_parse(workdir, "HEAD").map_err(|e| {
+            // Still inside the paused rebase, so the abort comes first.
+            let e = git::rebase_abort_then_cleanup(workdir, e, || {});
+            git::restore_or_park_after_abort(workdir, &saved_worktree.staged, &e);
+            e
+        })?;
 
-        git::continue_rebase_expecting_edit(workdir, git::AfterStop::nothing())?;
+        git::continue_rebase_expecting_edit(workdir, git::AfterStop::nothing()).inspect_err(
+            |e| git::restore_or_park_after_abort(workdir, &saved_worktree.staged, e),
+        )?;
 
         if !gitlink && let Err(e) = git::apply_patch_to_worktree(workdir, &file_diff) {
             rollback_fold(workdir, &saved_head, Some(&saved_refs), &saved_worktree);
             return Err(e).context("Failed to uncommit file, operation rolled back");
         }
+        // After the worktree apply, like every other uncommit path: its failure
+        // recovery checks files out of the index, so it has to see the index
+        // the rebase left rather than one this restore has written to.
+        git::restore_staged_after_rebase(workdir, &saved_worktree.staged);
     }
 
     let mut staged_removal = false;
@@ -2175,18 +2187,30 @@ fn fold_commit_file_to_commit(
             &[target_hash],
         ) {
             let _ = git::branch_delete(workdir, TRACK_BRANCH);
+            git::restore_or_park_after_abort(workdir, &saved_worktree.staged, &e);
             return Err(e);
         }
 
         if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, true) {
-            return Err(git::rebase_abort_then_cleanup(workdir, e, || {
+            // Outside the cleanup closure: a failed abort skips it, and there
+            // is no `LoomState` for `loom abort` to find the patch in.
+            let e = git::rebase_abort_then_cleanup(workdir, e, || {
                 let _ = git::branch_delete(workdir, TRACK_BRANCH);
-            }));
+            });
+            git::restore_or_park_after_abort(workdir, &saved_worktree.staged, &e);
+            return Err(e);
         }
 
         // Capture source's new hash before continue moves HEAD;
         // it will be tracked through phase 2 via a temp branch.
-        let phase1_source_hash = git::rev_parse(workdir, "HEAD")?;
+        let phase1_source_hash = git::rev_parse(workdir, "HEAD").map_err(|e| {
+            // Still inside the paused rebase, so the abort comes first.
+            let e = git::rebase_abort_then_cleanup(workdir, e, || {
+                let _ = git::branch_delete(workdir, TRACK_BRANCH);
+            });
+            git::restore_or_park_after_abort(workdir, &saved_worktree.staged, &e);
+            e
+        })?;
 
         // The source replays during this continue and again in phase 2, where
         // TRACK_BRANCH follows it; dropping it as empty would leave the hash
@@ -2197,22 +2221,30 @@ fn fold_commit_file_to_commit(
             git::AfterStop::nothing().protecting(&protect),
         ) {
             let _ = git::branch_delete(workdir, TRACK_BRANCH);
+            git::restore_or_park_after_abort(workdir, &saved_worktree.staged, &e);
             return Err(e);
         }
 
+        // Phase 1's rebase is over, so its autostash has already come back
+        // unstaged: every exit from here on has to put the index back.
+        let restage = || git::restore_staged_after_rebase(workdir, &saved_worktree.staged);
+
         // Phase 2: resolve the target's new OID via the temp branch.
-        let phase2_target_hash = git::rev_parse(workdir, TRACK_BRANCH)?;
+        let phase2_target_hash =
+            git::rev_parse(workdir, TRACK_BRANCH).inspect_err(|_| restage())?;
         let _ = git::branch_delete(workdir, TRACK_BRANCH);
-        let phase2_target_oid = git2::Oid::from_str(&phase2_target_hash)?;
+        let phase2_target_oid =
+            git2::Oid::from_str(&phase2_target_hash).inspect_err(|_| restage())?;
 
         // Re-open repo after phase 1 rebase (OIDs changed)
-        let repo2 = Repository::open(workdir)?;
-        let mut graph2 = Weave::from_repo(&repo2)?;
+        let repo2 = Repository::open(workdir).inspect_err(|_| restage())?;
+        let mut graph2 = Weave::from_repo(&repo2).inspect_err(|_| restage())?;
         let _ = graph2.edit_commit(phase2_target_oid);
 
         // Track source through phase 2 — it will be rewritten when the
         // graph is replayed from base_oid.
-        let phase1_source_oid = git2::Oid::from_str(&phase1_source_hash)?;
+        let phase1_source_oid =
+            git2::Oid::from_str(&phase1_source_hash).inspect_err(|_| restage())?;
         if let Err(e) = track_through_rebase(&mut graph2, workdir, phase1_source_oid) {
             rollback();
             return Err(e);
@@ -2235,7 +2267,10 @@ fn fold_commit_file_to_commit(
             return Err(git::rebase_abort_then_cleanup(workdir, e, rollback));
         }
 
-        new_target_hash = git::rev_parse(workdir, "HEAD")?;
+        new_target_hash = git::rev_parse(workdir, "HEAD").map_err(|e| {
+            // Still inside the paused rebase, so the abort comes first.
+            git::rebase_abort_then_cleanup(workdir, e, rollback)
+        })?;
 
         if let Err(e) = git::continue_rebase_expecting_edit(
             workdir,
@@ -2245,7 +2280,10 @@ fn fold_commit_file_to_commit(
             return Err(e);
         }
 
-        new_source_hash = git::rev_parse(workdir, TRACK_BRANCH)?;
+        new_source_hash = git::rev_parse(workdir, TRACK_BRANCH).inspect_err(|_| {
+            let _ = git::branch_delete(workdir, TRACK_BRANCH);
+            restage();
+        })?;
         let _ = git::branch_delete(workdir, TRACK_BRANCH);
     } else {
         // Source is older than target: single rebase with two edit pauses.
@@ -2269,13 +2307,23 @@ fn fold_commit_file_to_commit(
             &todo,
             source_oid,
             &[],
-        )?;
+        )
+        .inspect_err(|e| git::restore_or_park_after_abort(workdir, &saved_worktree.staged, e))?;
 
         if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, true) {
-            return Err(git::rebase_abort_then_cleanup(workdir, e, || {}));
+            // Outside the cleanup closure: a failed abort skips it, and there
+            // is no `LoomState` for `loom abort` to find the patch in.
+            let e = git::rebase_abort_then_cleanup(workdir, e, || {});
+            git::restore_or_park_after_abort(workdir, &saved_worktree.staged, &e);
+            return Err(e);
         }
 
-        new_source_hash = git::rev_parse(workdir, "HEAD")?;
+        new_source_hash = git::rev_parse(workdir, "HEAD").map_err(|e| {
+            // Still inside the paused rebase, so the abort comes first.
+            git::rebase_abort_then_cleanup(workdir, e, || {
+                rollback_fold(workdir, &saved_head, Some(&saved_refs), &saved_worktree);
+            })
+        })?;
 
         // The source amend is already committed, so a continue that never
         // reached the target leaves the file removed and nowhere else: it has
@@ -2295,7 +2343,12 @@ fn fold_commit_file_to_commit(
             }));
         }
 
-        new_target_hash = git::rev_parse(workdir, "HEAD")?;
+        new_target_hash = git::rev_parse(workdir, "HEAD").map_err(|e| {
+            // Still inside the paused rebase, so the abort comes first.
+            git::rebase_abort_then_cleanup(workdir, e, || {
+                rollback_fold(workdir, &saved_head, Some(&saved_refs), &saved_worktree);
+            })
+        })?;
 
         if let Err(e) = git::continue_rebase_expecting_edit(workdir, git::AfterStop::nothing()) {
             return Err(git::rebase_abort_then_cleanup(workdir, e, || {
@@ -2303,6 +2356,8 @@ fn fold_commit_file_to_commit(
             }));
         }
     }
+
+    git::restore_staged_after_rebase(workdir, &saved_worktree.staged);
 
     msg::success(&format!(
         "Moved `{}` from `{}` (now {}) to `{}` (now {})",
@@ -2357,7 +2412,11 @@ fn fold_commit_to_unstaged(repo: &Repository, commit_hash: &str) -> Result<()> {
         })?;
         let loom_state = LoomState {
             command: COMMAND.to_string(),
-            rollback: Rollback::default(),
+            rollback: Rollback {
+                // Restored whichever way the rebase ends (Spec 014).
+                saved_staged_patch: saved_worktree.staged.clone(),
+                ..Default::default()
+            },
             context: fold_ctx,
             protect: Vec::new(),
         };
@@ -2365,7 +2424,14 @@ fn fold_commit_to_unstaged(repo: &Repository, commit_hash: &str) -> Result<()> {
 
         let todo = graph.to_todo();
         let outcome = weave::run_rebase(workdir, Some(&graph.base_oid.to_string()), &todo)
-            .map_err(|e| transaction::discard_state_after(workdir, &git_dir, e))?;
+            .map_err(|e| {
+                transaction::discard_state_after(
+                    workdir,
+                    &git_dir,
+                    &loom_state.rollback.saved_staged_patch,
+                    e,
+                )
+            })?;
         let staged = match outcome {
             RebaseOutcome::Completed => {
                 transaction::delete(&git_dir)?;
@@ -2377,6 +2443,7 @@ fn fold_commit_to_unstaged(repo: &Repository, commit_hash: &str) -> Result<()> {
                         "Failed to apply changes to working directory, operation rolled back",
                     );
                 }
+                git::restore_staged_after_rebase(workdir, &loom_state.rollback.saved_staged_patch);
                 keep_submodule_removals(workdir, commit_hash)
             }
             RebaseOutcome::Paused => {
@@ -2417,19 +2484,29 @@ fn report_uncommitted(commit_hash: &str, emptied: &[String], staged: &[String]) 
 }
 
 /// Resume a `fold` operation after a conflict has been resolved.
-pub fn after_continue(workdir: &Path, context: &serde_json::Value) -> Result<()> {
+pub fn after_continue(
+    workdir: &Path,
+    rollback: &Rollback,
+    context: &serde_json::Value,
+) -> Result<()> {
     let variant: FoldVariant =
         serde_json::from_value(context.clone()).context("Failed to parse fold resume context")?;
+    // Every variant that saved a patch restores it here; the rest saved none.
+    // `CommitToUnstaged` is the exception and does its own below, after the
+    // worktree apply: that apply's failure recovery checks files out of the
+    // index, so it has to see the index the direct path leaves it, not one the
+    // restore has already written to.
+    if !matches!(variant, FoldVariant::CommitToUnstaged { .. }) {
+        git::restore_staged_after_rebase(workdir, &rollback.saved_staged_patch);
+    }
 
     match variant {
         FoldVariant::FilesIntoCommit {
             original_commit_hash,
             files_count,
-            saved_staged,
         } => {
             let new_hash = git::rev_parse(workdir, TRACK_BRANCH)?;
             let _ = git::branch_delete(workdir, TRACK_BRANCH);
-            git::restore_staged_patch(workdir, &saved_staged);
             msg::success(&format!(
                 "Folded {} file(s) into `{}` (now {})",
                 files_count,
@@ -2482,6 +2559,7 @@ pub fn after_continue(workdir: &Path, context: &serde_json::Value) -> Result<()>
                 }
                 msg::warn(&warning);
             }
+            git::restore_staged_after_rebase(workdir, &rollback.saved_staged_patch);
             let staged = keep_submodule_removals(workdir, &commit_hash);
             report_uncommitted(&commit_hash, &emptied, &staged);
         }

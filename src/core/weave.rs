@@ -1547,9 +1547,31 @@ pub fn run_rebase_or_abort(
     upstream: Option<&str>,
     todo_content: &str,
 ) -> Result<()> {
-    match run_rebase(workdir, upstream, todo_content)? {
-        RebaseOutcome::Completed => Ok(()),
-        RebaseOutcome::Stopped | RebaseOutcome::Paused => Err(git::abort_after_failure(workdir)),
+    // The autostash replay re-stages nothing, whichever way this ends (Spec 004).
+    let saved_staged = git::diff_cached(workdir)?;
+    match run_rebase(workdir, upstream, todo_content) {
+        Ok(RebaseOutcome::Completed) => {
+            git::restore_staged_after_rebase(workdir, &saved_staged);
+            Ok(())
+        }
+        Ok(RebaseOutcome::Stopped | RebaseOutcome::Paused) => {
+            // `abort_after_failure` has aborted already, so this does not go
+            // through `rebase_abort_then_cleanup`: a second abort would report
+            // the failure twice.
+            let err = git::abort_after_failure(workdir);
+            git::restore_or_park_after_abort(workdir, &saved_staged, &err);
+            Err(err)
+        }
+        // A pre-flight refusal never autostashed, so that index is not ours.
+        Err(e) if git::rebase_never_started(&e) => Err(e),
+        Err(e) => {
+            // The restore goes after, not in the cleanup closure: a failed abort
+            // skips that closure, and this is the one caller with no `LoomState`
+            // for `loom abort` to find the patch in.
+            let err = git::rebase_abort_then_cleanup(workdir, e, || {});
+            git::restore_or_park_after_abort(workdir, &saved_staged, &err);
+            Err(err)
+        }
     }
 }
 

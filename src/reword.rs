@@ -104,8 +104,14 @@ pub fn reword_commit(repo: &Repository, commit_hash: &str, message: Option<Strin
         None => None,
     };
 
+    // Restored whichever way the rebase ends (Spec 014).
+    let saved_staged = git::diff_cached(workdir)?;
+
     // Step 1: Start interactive rebase with edit at target
-    weave::start_edit_rebase(repo, workdir, commit_oid)?;
+    // No state file exists yet, so a rebase still running after a failed abort
+    // leaves nobody to put the staging back: it is parked instead.
+    weave::start_edit_rebase(repo, workdir, commit_oid)
+        .inspect_err(|e| git::restore_or_park_after_abort(workdir, &saved_staged, e))?;
 
     // Step 2: Amend the commit message
     let amend = git::commit_amend(workdir, message.as_deref()).and_then(|()| match message {
@@ -113,7 +119,11 @@ pub fn reword_commit(repo: &Repository, commit_hash: &str, message: Option<Strin
         None => changeid::ensure_on_head(repo, workdir, keep.as_deref()),
     });
     if let Err(e) = amend {
-        return Err(git::rebase_abort_then_cleanup(workdir, e, || {}));
+        // Outside the cleanup closure, for the reason given on step 1: a failed
+        // abort skips it, and there is still no state file.
+        let e = git::rebase_abort_then_cleanup(workdir, e, || {});
+        git::restore_or_park_after_abort(workdir, &saved_staged, &e);
+        return Err(e);
     }
 
     // Capture the new hash right after amending (before rebase --continue moves HEAD)
@@ -129,10 +139,13 @@ pub fn reword_commit(repo: &Repository, commit_hash: &str, message: Option<Strin
         &git_dir,
         &LoomState {
             command: "reword".to_string(),
-            // Nothing to undo beyond the rebase itself: `git rebase --abort`
-            // discards the amend along with it, and reword creates no commits,
-            // branches, or saved patches of its own.
-            rollback: Rollback::default(),
+            // Nothing else to undo: `git rebase --abort` discards the amend
+            // along with the rebase, and reword creates no commits or branches
+            // of its own.
+            rollback: Rollback {
+                saved_staged_patch: saved_staged.clone(),
+                ..Default::default()
+            },
             context: serde_json::to_value(&ctx)?,
             protect: Vec::new(),
         },
@@ -143,11 +156,17 @@ pub fn reword_commit(repo: &Repository, commit_hash: &str, message: Option<Strin
     // `--empty=drop` did, rather than report it as a conflict.
     let outcome = git::skip_empty_stops(workdir, &git_dir, &[], git::continue_rebase(workdir)?)
         .inspect_err(|_| {
-            // The rebase is gone by now, so the state file describes nothing.
-            let _ = transaction::delete(&git_dir);
+            // The refusal aborted the rebase itself, so there is none to abort
+            // here — but that abort can fail, and then the state file and the
+            // index are both still `loom abort`'s to deal with.
+            if git::rebase_is_over(workdir) {
+                let _ = transaction::delete(&git_dir);
+                git::restore_staged_after_rebase(workdir, &saved_staged);
+            }
         })?;
     match outcome {
         git::RebaseOutcome::Completed => {
+            git::restore_staged_after_rebase(workdir, &saved_staged);
             transaction::delete(&git_dir)?;
             report_reworded(workdir, &ctx);
         }
@@ -163,9 +182,14 @@ pub fn reword_commit(repo: &Repository, commit_hash: &str, message: Option<Strin
 }
 
 /// Resume a `reword` after a conflict has been resolved.
-pub fn after_continue(workdir: &Path, context: &serde_json::Value) -> Result<()> {
+pub fn after_continue(
+    workdir: &Path,
+    rollback: &Rollback,
+    context: &serde_json::Value,
+) -> Result<()> {
     let ctx: RewordContext =
         serde_json::from_value(context.clone()).context("Failed to parse reword resume context")?;
+    git::restore_staged_after_rebase(workdir, &rollback.saved_staged_patch);
     report_reworded(workdir, &ctx);
     Ok(())
 }

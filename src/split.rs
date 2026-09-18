@@ -234,7 +234,8 @@ fn run_split(
     let oid_str = commit_oid.to_string();
     let short_hash = git::short_hash(&oid_str);
     // Save pre-existing staged changes so `reset --mixed` does not discard them.
-    // (Empty for non-HEAD splits, where the rebase autostash handles it.)
+    // Unstaging them first also keeps the restore below a plain apply: a split
+    // leaves HEAD's tree as it was, so the patch still applies over it.
     let saved_staged = staging::save_and_unstage_staged(repo, workdir)?;
     let split_result = do_split(is_head);
     // Restore pre-existing staged changes regardless of outcome.

@@ -90,7 +90,8 @@ git-loom update [--yes]
 **What stays the same:**
 - Feature branch refs are kept in sync via `--update-refs`
 - Merge topology (branch sections and merge commits) is preserved
-- Working tree changes are preserved via autostash
+- Working tree changes are preserved via autostash, and staged changes come
+  back staged (Spec 014)
 - Branches without tracking configuration are not affected by gone-upstream
   cleanup
 
@@ -216,7 +217,7 @@ git-loom update
 ```
 
 Uncommitted changes are automatically stashed before the rebase and restored
-after.
+after, staged ones as staged.
 
 ### Update with submodules
 

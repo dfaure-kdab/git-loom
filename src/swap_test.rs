@@ -157,3 +157,106 @@ fn swap_refuses_when_a_swapped_commit_replays_empty() {
         "{err}"
     );
 }
+
+/// Regression: the autostash replay unstages a staged *modification* on a
+/// rebase that completed, not only on one that was aborted.
+#[test]
+fn swap_keeps_staging_on_success() {
+    let t = TestRepo::new_with_remote();
+    let c1 = t.commit("First", "first.txt");
+    let c2 = t.commit("Second", "second.txt");
+    t.write_file("first.txt", "first\nstaged edit\n");
+    t.write_file("brand-new.txt", "new\n");
+    t.stage_files(&["first.txt", "brand-new.txt"]);
+    t.write_file("second.txt", "second\nunstaged edit\n");
+    let before = t.status_porcelain();
+
+    super::swap_two_commits(&t.repo, c1.to_string(), c2.to_string()).unwrap();
+
+    assert_eq!(t.status_porcelain(), before);
+    // The letters alone would pass on a restore that staged the wrong bytes.
+    assert_eq!(
+        crate::git::run_git_stdout(&t.workdir(), &["show", ":first.txt"]).unwrap(),
+        "first\nstaged edit\n"
+    );
+    assert_eq!(
+        crate::git::run_git_stdout(&t.workdir(), &["show", ":brand-new.txt"]).unwrap(),
+        "new\n"
+    );
+}
+
+/// Same for the resumed half: `loom continue` finishes the rebase, so it owns
+/// the restore the `Completed` arm would have done.
+#[test]
+fn swap_keeps_staging_across_continue() {
+    let t = TestRepo::new_with_remote();
+
+    // Both replays conflict on `shared.txt`: A creates it, B rewrites it, and
+    // the swap replays each onto a tree the other has not touched yet.
+    let a_oid = t.commit("version-a", "shared.txt");
+    t.write_file("shared.txt", "version-b");
+    t.stage_files(&["shared.txt"]);
+    t.commit_staged("Commit B");
+    let b_oid = t.head_oid();
+
+    t.write_file("bystander.txt", "bystander\n");
+    t.stage_files(&["bystander.txt"]);
+    t.commit_staged("Commit C");
+    t.write_file("bystander.txt", "bystander\nstaged edit\n");
+    t.stage_files(&["bystander.txt"]);
+    let before = t.status_porcelain();
+
+    super::swap_two_commits(&t.repo, a_oid.to_string(), b_oid.to_string()).unwrap();
+
+    let workdir = t.workdir();
+    for content in ["version-b", "version-a"] {
+        assert!(crate::git::rebase_is_in_progress(t.repo.path()));
+        t.write_file("shared.txt", content);
+        t.stage_files(&["shared.txt"]);
+        crate::core::transaction::continue_cmd(&workdir, t.repo.path()).unwrap();
+    }
+
+    assert!(!crate::git::rebase_is_in_progress(t.repo.path()));
+    assert_eq!(t.status_porcelain(), before);
+}
+
+/// The staged file is the one the replay conflicts on, so the autostash pop
+/// conflicts too. Loom must leave that merge alone: the stages are the user's
+/// to resolve and the staging lives in the stash git kept.
+#[test]
+fn swap_leaves_a_conflicted_autostash_pop_alone() {
+    let t = TestRepo::new_with_remote();
+    let a_oid = t.commit("version-a", "shared.txt");
+    t.write_file("shared.txt", "version-b");
+    t.stage_files(&["shared.txt"]);
+    t.commit_staged("Commit B");
+    let b_oid = t.head_oid();
+
+    t.write_file("shared.txt", "staged-version");
+    t.stage_files(&["shared.txt"]);
+    t.write_file("shared.txt", "worktree-version");
+
+    super::swap_two_commits(&t.repo, a_oid.to_string(), b_oid.to_string()).unwrap();
+    let workdir = t.workdir();
+    for content in ["version-b", "version-a"] {
+        assert!(crate::git::rebase_is_in_progress(t.repo.path()));
+        t.write_file("shared.txt", content);
+        t.stage_files(&["shared.txt"]);
+        crate::core::transaction::continue_cmd(&workdir, t.repo.path()).unwrap();
+    }
+
+    assert_eq!(t.status_porcelain(), "UU shared.txt\n");
+    assert!(crate::git::has_unmerged_paths(&workdir));
+    assert!(
+        crate::git::run_git_stdout(&workdir, &["stash", "list"])
+            .unwrap()
+            .contains("autostash"),
+        "the staging git could not replay stays in the stash"
+    );
+    // `git stash pop --index` is refused over an unmerged index, so the staged
+    // side is handed over as a patch rather than left to the stash alone.
+    let parked = crate::git::git_path(&workdir, "loom")
+        .unwrap()
+        .join("unrestored-staged-0.patch");
+    assert!(parked.exists(), "the staged side is parked as well");
+}

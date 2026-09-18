@@ -661,5 +661,61 @@ fn after_continue_reads_a_state_file_with_the_old_field_name() {
 
     let ctx: super::RewordContext = serde_json::from_value(context.clone()).unwrap();
     assert_eq!(ctx.new_hash, "def5678");
-    super::after_continue(&test_repo.workdir(), &context).unwrap();
+    let rollback = crate::core::transaction::Rollback::default();
+    super::after_continue(&test_repo.workdir(), &rollback, &context).unwrap();
+}
+
+/// Regression: the autostash replay unstages a staged *modification*, so a
+/// reword that succeeded has to put the index back too.
+#[test]
+fn reword_keeps_staging_on_success() {
+    let t = TestRepo::new_with_remote();
+    t.commit("First", "first.txt");
+    let c2 = t.commit("Second", "second.txt");
+    t.commit("Third", "third.txt");
+    t.write_file("first.txt", "staged edit\n");
+    t.write_file("brand-new.txt", "new\n");
+    t.stage_files(&["first.txt", "brand-new.txt"]);
+    let before = t.status_porcelain();
+
+    super::reword_commit(
+        &t.repo,
+        &c2.to_string(),
+        Some("Second, reworded".to_string()),
+    )
+    .unwrap();
+
+    assert_eq!(t.status_porcelain(), before);
+}
+
+/// `loom continue` finishes the rebase, so it owns the restore the `Completed`
+/// arm would have done.
+#[test]
+fn reword_keeps_staging_across_continue() {
+    let test_repo = TestRepo::new_with_remote();
+    let a1 = woven_repo_with_hand_resolved_merge(&test_repo);
+
+    test_repo.write_file("bystander.txt", "bystander\n");
+    test_repo.stage_files(&["bystander.txt"]);
+    test_repo.commit_staged("Bystander");
+    test_repo.write_file("bystander.txt", "bystander\nstaged edit\n");
+    test_repo.write_file("brand-new.txt", "new\n");
+    test_repo.stage_files(&["bystander.txt", "brand-new.txt"]);
+    let before = test_repo.status_porcelain();
+
+    super::reword_commit(
+        &test_repo.repo,
+        &a1.to_string(),
+        Some("A1 reworded".to_string()),
+    )
+    .unwrap();
+    assert!(crate::git::rebase_is_in_progress(test_repo.repo.path()));
+
+    test_repo.write_file("shared.txt", "first\nfrom-a\nfrom-b\nlast\n");
+    test_repo.stage_files(&["shared.txt"]);
+    let workdir = test_repo.workdir();
+    crate::core::transaction::continue_cmd(&workdir, test_repo.repo.path()).unwrap();
+
+    assert!(!crate::git::rebase_is_in_progress(test_repo.repo.path()));
+    assert_eq!(test_repo.status_porcelain(), before);
 }

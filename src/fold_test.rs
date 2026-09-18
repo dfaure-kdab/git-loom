@@ -3996,3 +3996,199 @@ fn a_left_behind_file_is_named_and_the_fold_proceeds() {
          and run `loom fold <id> zz`"
     );
 }
+
+// ── Staging survives a rebase that completed ─────────────────────────────
+
+/// `origin/main` → B1 → merge(A1, `feature-a`) → C1 (loose, on integration).
+/// `b1.txt` is the tracked file a move leaves where it is.
+fn woven_repo_with_a_loose_commit() -> TestRepo {
+    let t = TestRepo::new_with_remote();
+    let a1 = t.commit("A1", "a1.txt");
+    t.create_branch_at("feature-a", &a1.to_string());
+    let base = t.find_remote_branch_target("origin/main");
+    t.commit("B1", "b1.txt");
+    t.rebase_onto(&base.to_string(), &a1.to_string());
+    t.merge_no_ff("feature-a");
+    t.commit("C1", "c1.txt");
+    t
+}
+
+/// A staged edit to a tracked file, plus a staged new file: the autostash
+/// replay brings the new file back staged, the modification unstaged.
+fn stage_a_mix(t: &TestRepo, tracked: &str) -> String {
+    t.write_file(tracked, "staged edit\n");
+    t.write_file("brand-new.txt", "new\n");
+    t.stage_files(&[tracked, "brand-new.txt"]);
+    t.status_porcelain()
+}
+
+#[test]
+fn fold_commit_into_commit_keeps_staging_on_success() {
+    let t = TestRepo::new_with_remote();
+    let c1 = t.commit("First", "first.txt");
+    t.commit("Second", "second.txt");
+    let c3 = t.commit("Third", "third.txt");
+    let before = stage_a_mix(&t, "first.txt");
+
+    super::fold_commit_into_commit(&t.repo, &c3.to_string(), &c1.to_string()).unwrap();
+
+    assert_eq!(t.status_porcelain(), before);
+}
+
+#[test]
+fn fold_commit_to_branch_keeps_staging_on_success() {
+    let t = woven_repo_with_a_loose_commit();
+    let loose = t.head_oid();
+    let before = stage_a_mix(&t, "b1.txt");
+
+    super::fold_commit_to_branch(&t.repo, &loose.to_string(), "feature-a").unwrap();
+
+    assert_eq!(t.status_porcelain(), before);
+}
+
+#[test]
+fn move_commits_to_branch_keeps_staging_on_success() {
+    let t = woven_repo_with_a_loose_commit();
+    let c1 = t.head_oid();
+    let c2 = t.commit("C2", "c2.txt");
+    let before = stage_a_mix(&t, "b1.txt");
+
+    let workdir = t.workdir();
+    super::move_commits_and_report(
+        &workdir,
+        &t.repo,
+        &[c1.to_string(), c2.to_string()],
+        "feature-a",
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(t.status_porcelain(), before);
+}
+
+#[test]
+fn fold_commit_relative_keeps_staging_on_success() {
+    let t = TestRepo::new_with_remote();
+    let base = t.find_remote_branch_target("origin/main").to_string();
+    t.create_branch_at("feature-a", &base);
+    t.switch_branch("feature-a");
+    let a1 = t.commit("A1", "a1.txt");
+    t.commit("A2", "a2.txt");
+    let a3 = t.commit("A3", "a3.txt");
+    t.switch_branch("integration");
+    t.merge_no_ff("feature-a");
+    let before = stage_a_mix(&t, "a1.txt");
+
+    super::fold_commit_relative(&t.repo, &a3.to_string(), &a1.to_string(), Position::Below)
+        .unwrap();
+
+    assert_eq!(t.status_porcelain(), before);
+}
+
+#[test]
+fn move_commits_relative_keeps_staging_on_success() {
+    let t = TestRepo::new_with_remote();
+    let base = t.find_remote_branch_target("origin/main").to_string();
+    t.create_branch_at("feature-a", &base);
+    t.switch_branch("feature-a");
+    let a1 = t.commit("A1", "a1.txt");
+    t.commit("A2", "a2.txt");
+    let a3 = t.commit("A3", "a3.txt");
+    let a4 = t.commit("A4", "a4.txt");
+    t.switch_branch("integration");
+    t.merge_no_ff("feature-a");
+    let before = stage_a_mix(&t, "a1.txt");
+
+    super::move_commits_relative_and_report(
+        &t.repo,
+        &[a3.to_string(), a4.to_string()],
+        &a1.to_string(),
+        Position::Below,
+    )
+    .unwrap();
+
+    assert_eq!(t.status_porcelain(), before);
+}
+
+/// `loom continue` finishes the rebase, so it owns the restore the `Completed`
+/// arm would have done.
+#[test]
+fn fold_keeps_staging_across_continue() {
+    let t = TestRepo::new_with_remote();
+
+    // Folding C into A rewrites `shared.txt`; replaying B then expects A's
+    // original content → conflict.
+    let a_oid = t.commit("version-a", "shared.txt");
+    t.write_file("shared.txt", "version-b");
+    t.stage_files(&["shared.txt"]);
+    t.commit_staged("Commit B");
+    t.write_file("shared.txt", "version-c");
+    t.stage_files(&["shared.txt"]);
+    t.commit_staged("Commit C");
+    let c_oid = t.head_oid();
+
+    t.write_file("bystander.txt", "bystander\n");
+    t.stage_files(&["bystander.txt"]);
+    t.commit_staged("Commit D");
+    let before = stage_a_mix(&t, "bystander.txt");
+
+    super::fold_commit_into_commit(&t.repo, &c_oid.to_string(), &a_oid.to_string()).unwrap();
+    assert!(crate::git::rebase_is_in_progress(t.repo.path()));
+
+    t.write_file("shared.txt", "version-b");
+    t.stage_files(&["shared.txt"]);
+    let workdir = t.workdir();
+    crate::core::transaction::continue_cmd(&workdir, t.repo.path()).unwrap();
+
+    assert!(!crate::git::rebase_is_in_progress(t.repo.path()));
+    assert_eq!(t.status_porcelain(), before);
+}
+
+#[test]
+fn fold_commit_to_unstaged_keeps_staging_on_success() {
+    let t = TestRepo::new_with_remote();
+    t.commit("First", "first.txt");
+    let c2 = t.commit("Second", "second.txt");
+    t.commit("Third", "third.txt");
+    let before = stage_a_mix(&t, "first.txt");
+
+    super::fold_commit_to_unstaged(&t.repo, &c2.to_string()).unwrap();
+
+    // The uncommitted commit's own file lands unstaged on top; the staged set
+    // is what has to be unchanged.
+    let after = t.status_porcelain();
+    let staged: Vec<&str> = after.lines().filter(|l| !l.starts_with("??")).collect();
+    assert_eq!(staged.join("\n") + "\n", before);
+    assert!(after.contains("?? second.txt"));
+}
+
+#[test]
+fn fold_commit_file_to_unstaged_keeps_staging_on_success() {
+    let t = TestRepo::new_with_remote();
+    t.commit("First", "first.txt");
+    let c2 = t.commit_multi(&[("a.txt", "a\n"), ("b.txt", "b\n")], "Second");
+    t.commit("Third", "third.txt");
+    let before = stage_a_mix(&t, "first.txt");
+
+    super::fold_commit_file_to_unstaged(&t.repo, &c2.to_string(), "a.txt").unwrap();
+
+    // `a.txt` leaves the commit and lands untracked; the staged set is what
+    // has to be unchanged.
+    let after = t.status_porcelain();
+    let staged: Vec<&str> = after.lines().filter(|l| !l.starts_with("??")).collect();
+    assert_eq!(staged.join("\n") + "\n", before);
+    assert!(after.contains("?? a.txt"));
+}
+
+#[test]
+fn fold_commit_file_to_commit_keeps_staging_on_success() {
+    let t = TestRepo::new_with_remote();
+    let c1 = t.commit("First", "first.txt");
+    let c2 = t.commit_multi(&[("a.txt", "a\n"), ("b.txt", "b\n")], "Second");
+    t.commit("Third", "third.txt");
+    let before = stage_a_mix(&t, "first.txt");
+
+    super::fold_commit_file_to_commit(&t.repo, &c2.to_string(), "a.txt", &c1.to_string()).unwrap();
+
+    assert_eq!(t.status_porcelain(), before);
+}

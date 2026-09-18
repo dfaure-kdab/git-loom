@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use git2::Repository;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use crate::branch::is_on_first_parent_line;
 use crate::core::msg;
@@ -304,17 +305,29 @@ fn drop_commit(repo: &Repository, commit_hash: &str, skip_confirm: bool) -> Resu
     };
     let state = LoomState {
         command: "drop".to_string(),
-        rollback: Rollback::default(),
+        rollback: Rollback {
+            // Restored whichever way the rebase ends (Spec 014).
+            saved_staged_patch: git::diff_cached(workdir)?,
+            ..Default::default()
+        },
         context: serde_json::to_value(&ctx)?,
         protect: Vec::new(),
     };
     transaction::save(&git_dir, &state)?;
 
     let todo = graph.to_todo();
-    let outcome = weave::run_rebase(workdir, Some(&graph.base_oid.to_string()), &todo)
-        .map_err(|e| transaction::discard_state_after(workdir, &git_dir, e))?;
+    let outcome =
+        weave::run_rebase(workdir, Some(&graph.base_oid.to_string()), &todo).map_err(|e| {
+            transaction::discard_state_after(
+                workdir,
+                &git_dir,
+                &state.rollback.saved_staged_patch,
+                e,
+            )
+        })?;
     match outcome {
         RebaseOutcome::Completed => {
+            git::restore_staged_after_rebase(workdir, &state.rollback.saved_staged_patch);
             transaction::delete(&git_dir)?;
             report_dropped(&ctx);
         }
@@ -330,9 +343,14 @@ fn drop_commit(repo: &Repository, commit_hash: &str, skip_confirm: bool) -> Resu
 }
 
 /// Resume a `drop commit` operation after a conflict has been resolved.
-pub fn after_continue(context: &serde_json::Value) -> Result<()> {
+pub fn after_continue(
+    workdir: &Path,
+    rollback: &Rollback,
+    context: &serde_json::Value,
+) -> Result<()> {
     let ctx: DropContext =
         serde_json::from_value(context.clone()).context("Failed to parse drop resume context")?;
+    git::restore_staged_after_rebase(workdir, &rollback.saved_staged_patch);
     report_dropped(&ctx);
     Ok(())
 }

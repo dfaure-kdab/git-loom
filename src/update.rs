@@ -143,6 +143,8 @@ pub fn run(skip_confirm: bool) -> Result<()> {
     let state = LoomState {
         command: "update".to_string(),
         rollback: Rollback {
+            // Restored whichever way the rebase ends (Spec 014).
+            saved_staged_patch: git::diff_cached(&workdir)?,
             ..Default::default()
         },
         context: serde_json::to_value(&ctx)?,
@@ -161,6 +163,7 @@ pub fn run(skip_confirm: bool) -> Result<()> {
     match outcome {
         Ok(RebaseOutcome::Completed) => {
             spinner.stop("Rebased onto upstream");
+            git::restore_staged_after_rebase(&workdir, &state.rollback.saved_staged_patch);
             transaction::delete(&git_dir)?;
             let repo2 = git2::Repository::discover(&workdir)?;
             post_update(&workdir, &repo2, &ctx)?;
@@ -175,13 +178,12 @@ pub fn run(skip_confirm: bool) -> Result<()> {
         }
         Err(e) => {
             spinner.error("Rebase failed");
-            return Err(git::rebase_abort_then_cleanup(&workdir, e, || {
-                if let Err(e) = transaction::delete(&git_dir) {
-                    // Left behind, it blocks every later loom command with a
-                    // "paused" message for an operation that is over.
-                    msg::warn(&format!("could not remove the loom state file: {e}"));
-                }
-            }));
+            return Err(transaction::discard_state_after(
+                &workdir,
+                &git_dir,
+                &state.rollback.saved_staged_patch,
+                e,
+            ));
         }
     }
 
@@ -235,9 +237,14 @@ fn fetch_push_remote(repo: &git2::Repository, workdir: &Path, upstream_name: &st
 }
 
 /// Resume an `update` operation after a conflict has been resolved.
-pub fn after_continue(workdir: &Path, context: &serde_json::Value) -> Result<()> {
+pub fn after_continue(
+    workdir: &Path,
+    rollback: &Rollback,
+    context: &serde_json::Value,
+) -> Result<()> {
     let ctx: UpdateContext =
         serde_json::from_value(context.clone()).context("Failed to parse update resume context")?;
+    git::restore_staged_after_rebase(workdir, &rollback.saved_staged_patch);
     let repo = git2::Repository::discover(workdir)?;
     post_update(workdir, &repo, &ctx)
 }

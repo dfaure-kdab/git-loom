@@ -28,7 +28,8 @@ Swapped commits '<a>' and '<b>'
 
 The displayed values are the command's resolved display identifiers.
 Uncommitted worktree changes must be preserved through `git rebase
---autostash`.
+--autostash`, and staged changes must come back staged, on success and on
+`loom continue` as much as on `loom abort` (Spec 014).
 
 ## Errors
 

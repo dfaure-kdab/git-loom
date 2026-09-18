@@ -134,3 +134,8 @@ git loom reword feature-secrets -m local-secrets
 
 - Any git repository for commit rewording
 - For short IDs: must be on a branch with upstream tracking configured
+
+## Notes
+
+- Uncommitted working tree changes are preserved automatically, and staged
+  changes come back staged
