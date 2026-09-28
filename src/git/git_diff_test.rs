@@ -115,3 +115,31 @@ fn diff_head_files_display_with_no_paths_is_empty_not_everything() {
             .contains("+two")
     );
 }
+
+/// `core.quotePath` defaults to on, so without `-z` a non-ASCII path comes back
+/// escaped and quoted, matches no pathspec, and the hunk picker drops the file.
+#[test]
+fn diff_commit_name_status_returns_raw_paths() {
+    let test_repo = TestRepo::new();
+    test_repo.commit_multi(&[("café.txt", "a\nb\n"), ("plain.txt", "x\n")], "Add");
+    let workdir = test_repo.workdir();
+    git::run_git(&workdir, &["mv", "café.txt", "néw.txt"]).unwrap();
+    test_repo.write_file("néw.txt", "a\nb\nc\n");
+    test_repo.write_file("plain.txt", "y\n");
+    test_repo.write_file("thé.txt", "t\n");
+    test_repo.stage_files(&["néw.txt", "plain.txt", "thé.txt"]);
+    test_repo.commit_staged("Rename");
+
+    let mut changed = git::diff_commit_name_status(&workdir, "HEAD").unwrap();
+    changed.sort();
+
+    assert_eq!(
+        changed,
+        [
+            ('A', "néw.txt".to_string()),
+            ('A', "thé.txt".to_string()),
+            ('D', "café.txt".to_string()),
+            ('M', "plain.txt".to_string()),
+        ]
+    );
+}
