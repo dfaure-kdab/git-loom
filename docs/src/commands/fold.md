@@ -278,12 +278,18 @@ git loom fold osy zz
 # Removes commit osy, its changes appear as unstaged modifications
 ```
 
-The changes are merged back into the working tree three-way, so a later commit
-that edited nearby lines does not break the apply (`-p` hunk selections are the
-exception — they carry no blob ids to merge through). It still fails when they
-overlap for real, or when you have uncommitted changes in one of the same
-files. Either way nothing is left half-done: history and your uncommitted
+On HEAD the working tree is left alone: it already holds the changes. Below
+HEAD, the changes are merged back into the working tree three-way, so a later
+commit that edited nearby lines does not break the apply (`-p` hunk selections
+are the exception — they carry no blob ids to merge through). It still fails
+when they overlap for real, or when you have uncommitted changes in one of the
+same files. Either way nothing is left half-done: history and your uncommitted
 changes both go back to where they were.
+
+Staged changes stay staged. If a staged edit to one of the uncommitted files no
+longer applies over the parent's version, the staged edits to the uncommitted
+files are saved together as a patch under `.git/loom/` instead, and the command
+says where. Your other staged changes stay staged.
 
 If `osy` was the only commit of a branch, the branch survives, empty, at the base it built on — ready for `git loom commit -b <branch>` once the change is reworked:
 
@@ -301,6 +307,9 @@ Removes one file's changes from a commit, preserving the rest of the commit.
 git loom fold osy:1 zz
 # Removes the second file from commit osy to the working directory
 ```
+
+On HEAD, if the commit deleted the file and you have staged it again, the fold
+refuses: unstage it first.
 
 ### Submodules
 

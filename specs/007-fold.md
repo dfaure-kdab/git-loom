@@ -122,7 +122,7 @@ A single-source move is resumable on conflict; the moved commit is tracked throu
 
 `fold <commit> zz` removes one commit and exposes its changes as unstaged modifications.
 
-- **HEAD:** mixed-reset to `HEAD~1`.
+- **HEAD:** set aside staged changes to the commit's own files separately from the rest, mixed-reset to `HEAD~1`, then restage the rest, then the commit's files. If a staged edit to one of the commit's files no longer merges onto the parent's version, the staged edits to all of the commit's files are parked together (Spec 014); the rest stays staged.
 - **Non-HEAD:** capture the diff against the commit's own parent, drop the commit through Weave rebase, then three-way apply that diff onto the rewritten history. Later nearby edits may merge; a true overlap or pre-existing worktree edit to a touched file causes apply failure.
 
 Preserve unrelated uncommitted changes. Before rebase completion, any apply failure rolls history and all uncommitted state back. After a paused rebase is completed with `loom continue`, rollback is no longer possible: if re-apply fails, leave the commit dropped and save the diff as `<git-dir>/loom/unapplied-<n>.patch`, choosing a new number and never overwriting an earlier patch.
@@ -138,7 +138,8 @@ Other commits retain content/messages, unrelated branches remain unchanged, and 
 `fold <commit_sid:index> zz` removes that file's changes from the commit and exposes them unstaged while retaining the commit and its message.
 
 - Require the file in that commit; otherwise error exactly `File '<path>' has no changes in commit <short_hash>`.
-- At HEAD, reverse-apply the file diff, amend HEAD without it, then re-apply the diff to the worktree.
+- At HEAD, refuse when the commit deletes the file and the index holds it again (a staged re-add): the uncommit brings the entry back, and the staged work could not be restored over it.
+- At HEAD, set aside staged changes to the file separately from the rest, reverse-apply the file diff to the index only, amend HEAD without it, then restage the rest, then the file. The working tree, the user's edits to the file included, is left as it is. A staged edit to the file that no longer merges onto the parent's version is parked alone (Spec 014).
 - Below HEAD, reverse-apply, create a temporary commit, fix it into the target through Weave, then re-apply.
 - Re-apply and rollback use the same three-way and post-continue patch preservation rules as whole-commit uncommit.
 

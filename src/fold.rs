@@ -2141,28 +2141,68 @@ fn fold_commit_file_to_unstaged(
     let gitlinks = git::commit_gitlinks(workdir, commit_hash)?;
     let gitlink = gitlinks.contains_key(path);
 
-    // Snapshot for `rollback_to_snapshot`.
-    let saved_worktree = staging::WorktreeSnapshot::take(workdir)?;
-
     let new_hash;
 
     if is_head {
         let saved_head = head_oid.to_string();
-        // A failure part-way through leaves the file reverse-applied in the
-        // working tree, so this rolls back like the re-apply below does.
-        if let Err(e) = apply_and_amend_path(workdir, &file_diff, path, gitlink, true, git_opts) {
-            staging::rollback_to_snapshot(workdir, &saved_head, None, &saved_worktree);
+        // The uncommit brings the deleted entry back, which a staged re-add
+        // could not then be restored over: it would park all staged work.
+        if file_diff
+            .lines()
+            .any(|l| l.starts_with("deleted file mode "))
+            && !git::ls_files(workdir, &[path])?.is_empty()
+        {
+            bail!(
+                "`{path}` is back in the index after `{}` deleted it\n\
+                 Unstage it first, then fold again",
+                git::short_hash(commit_hash)
+            );
+        }
+        // Index only: with staged work set aside, `path`'s entry is HEAD's, so
+        // the reverse apply fits, and the working tree — the commit's change
+        // plus the user's own edits — is already what the uncommit leaves.
+        // `path`'s own staged edit may not merge back onto the parent's entry;
+        // set aside apart, it can only ever park itself.
+        let path_aside = staging::save_and_unstage_paths(repo, workdir, &[path])?;
+        let staged_aside = staging::save_and_unstage_staged_for_amend(repo, workdir)?;
+        if let Err(e) = git::apply_cached_patch_reverse(workdir, &file_diff)
+            .and_then(|()| git::commit_amend_no_edit(workdir, git_opts))
+        {
+            // Only `path`'s entry moved, and HEAD if a forwarded option let the
+            // amend through before its check failed. Not `rollback_to_snapshot`:
+            // the unstaging left a staged new file untracked, which its
+            // `reset --hard` keeps and its replay then cannot create. Not
+            // `stage_from`: `git restore --staged` refuses a deletion whose
+            // reverse apply failed, as it is in neither HEAD nor the index.
+            let literal = format!(":(literal){path}");
+            if let Err(reset_err) = git::reset_soft(workdir, &saved_head)
+                .and_then(|()| git::run_git(workdir, &["reset", "-q", &saved_head, "--", &literal]))
+            {
+                msg::warn(&format!(
+                    "could not reset back to {}: {reset_err}",
+                    git::short_hash(&saved_head)
+                ));
+                // Restoring over the wrong HEAD or index would only make it worse.
+                let patch = staged_aside.release() + &path_aside.release();
+                git::save_or_warn(
+                    workdir,
+                    "unrestored-staged",
+                    &patch,
+                    git::Replay::CachedThreeWay,
+                );
+                return Err(e).context("Failed to uncommit file");
+            }
             return Err(e).context("Failed to uncommit file, operation rolled back");
         }
+        staged_aside.restore();
+        path_aside.restore();
         new_hash = git::rev_parse(workdir, "HEAD")?;
-        if !gitlink && let Err(e) = git::apply_patch_to_worktree(workdir, &file_diff) {
-            staging::rollback_to_snapshot(workdir, &saved_head, None, &saved_worktree);
-            return Err(e).context("Failed to uncommit file, operation rolled back");
-        }
     } else {
         // Non-HEAD: edit+continue pattern with save-head rollback
         let saved_head = head_oid.to_string();
         let saved_refs = repo::snapshot_branch_refs(repo)?;
+        // Snapshot for `rollback_to_snapshot`.
+        let saved_worktree = staging::WorktreeSnapshot::take(workdir)?;
 
         let mut graph = Weave::from_repo(repo)?;
         let _ = graph.edit_commit(target_oid);
@@ -2513,7 +2553,16 @@ fn fold_commit_to_unstaged(repo: &Repository, commit_hash: &str) -> Result<()> {
     let is_head = head_oid == target_oid;
 
     if is_head {
+        // The reset would unstage staged work with no copy kept. Staged edits
+        // to the commit's own files may not merge back onto the parent, so
+        // they are set aside apart and can only ever park themselves.
+        let own = repo::commit_file_paths(repo, target_oid)?;
+        let own: Vec<&str> = own.iter().map(|p| p.as_str()).collect();
+        let own_aside = staging::save_and_unstage_paths(repo, workdir, &own)?;
+        let staged_aside = staging::save_and_unstage_staged(repo, workdir)?;
         git::reset_mixed(workdir, "HEAD~1")?;
+        staged_aside.restore();
+        own_aside.restore();
         let staged = keep_submodule_removals(workdir, commit_hash);
         report_uncommitted(commit_hash, &[], &staged);
         return Ok(());
