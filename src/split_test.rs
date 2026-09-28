@@ -401,6 +401,40 @@ fn split_head_by_hunks_takes_whole_files_from_the_commit() {
     );
 }
 
+/// Rename detection would list only the new path, so neither half of the split
+/// deleted the old one and the rewritten history brought it back.
+#[test]
+fn split_head_by_hunks_of_a_rename_keeps_the_tree() {
+    let test_repo = TestRepo::new();
+    test_repo.commit_multi(&[("old.txt", "a\nb\n"), ("plain.txt", "x\n")], "Base");
+    let workdir = test_repo.workdir();
+    crate::git::run_git(&workdir, &["mv", "old.txt", "new.txt"]).unwrap();
+    test_repo.write_file("new.txt", "a\nb\nc\n");
+    test_repo.write_file("plain.txt", "y\n");
+    test_repo.stage_files(&["new.txt", "plain.txt"]);
+    test_repo.commit_staged("Rename");
+    let original_tree = test_repo.repo.head().unwrap().peel_to_tree().unwrap().id();
+    let mut selections = crate::core::staging::collect_commit_hunks(&workdir, "HEAD", &[]).unwrap();
+    for file in &mut selections {
+        for hunk in &mut file.hunks {
+            hunk.selected = file.path == "plain.txt";
+        }
+    }
+
+    super::perform_head_split_by_hunks(
+        &test_repo.repo,
+        &workdir,
+        &selections,
+        Some("Plain"),
+        "Rename",
+    )
+    .unwrap();
+
+    let tree = test_repo.repo.head().unwrap().peel_to_tree().unwrap().id();
+    assert_eq!(tree, original_tree);
+    assert_eq!(test_repo.status_porcelain(), "");
+}
+
 /// A submodule has to be split by the commit's own diff: `git add` would stage
 /// whatever its checkout currently holds. Here the checkout deliberately holds
 /// the *pre-image*, so staging by path would drop the bump from history.
