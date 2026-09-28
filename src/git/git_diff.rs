@@ -154,29 +154,36 @@ pub fn diff_commit_file_is_binary(workdir: &Path, oid: &str, path: &str) -> Resu
 }
 
 /// List files changed in a commit as `(status_char, path)` pairs
-/// (`git diff --name-status <oid>^..<oid>`).
+/// (`git diff --no-renames --name-status <oid>^..<oid>`).
+///
+/// `--no-renames` because a rename would list only its new path, and a caller
+/// rebuilding the commit from these entries would never delete the old one.
 pub fn diff_commit_name_status(workdir: &Path, oid: &str) -> Result<Vec<(char, String)>> {
-    let out = diff_stdout(workdir, &["--name-status", &format!("{}^..{}", oid, oid)])?;
+    let out = diff_stdout(
+        workdir,
+        &[
+            "--no-renames",
+            "--name-status",
+            &format!("{}^..{}", oid, oid),
+        ],
+    )?;
     let mut result = Vec::new();
     for line in out.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let mut fields = line.splitn(3, '\t');
-        let status_field = fields.next().unwrap_or("");
-        let path1 = fields.next().unwrap_or("").trim();
-        let path2 = fields.next().map(str::trim);
-        if status_field.is_empty() || path1.is_empty() {
+        let Some((status_field, path)) = line.split_once('\t') else {
+            continue;
+        };
+        let path = path.trim();
+        let Some(status) = status_field.chars().next() else {
+            continue;
+        };
+        if path.is_empty() {
             continue;
         }
-        let status = status_field.chars().next().unwrap_or('M');
-        // For rename/copy entries (R/C), git outputs "old-path\tnew-path"; use the destination.
-        let path = match (status, path2) {
-            ('R' | 'C', Some(dest)) => dest.to_string(),
-            _ => path1.to_string(),
-        };
-        result.push((status, path));
+        result.push((status, path.to_string()));
     }
     Ok(result)
 }
