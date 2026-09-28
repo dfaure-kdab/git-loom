@@ -809,7 +809,45 @@ pub(crate) fn save_and_unstage_staged<'a>(
     repo: &Repository,
     workdir: &'a Path,
 ) -> Result<StagedAside<'a>> {
+    set_aside(workdir, repo::get_staged_files(repo)?)
+}
+
+/// [`save_and_unstage_staged`] for an amend with no rebase after it: leaves
+/// intent-to-add entries in the index, which no patch can carry back and no
+/// commit records. Not for a rebase: its autostash refuses such an index.
+pub(crate) fn save_and_unstage_staged_for_amend<'a>(
+    repo: &Repository,
+    workdir: &'a Path,
+) -> Result<StagedAside<'a>> {
     let staged = repo::get_staged_files(repo)?;
+    let mut index = repo.index()?;
+    index.read(true)?;
+    let intent = git2::IndexEntryExtendedFlag::INTENT_TO_ADD.bits();
+    let staged = staged
+        .into_iter()
+        .filter(|path| {
+            index
+                .get_path(Path::new(path), 0)
+                .is_none_or(|e| e.flags_extended & intent == 0)
+        })
+        .collect();
+    set_aside(workdir, staged)
+}
+
+/// [`save_and_unstage_staged`] for those of `paths` that are staged.
+pub(crate) fn save_and_unstage_paths<'a>(
+    repo: &Repository,
+    workdir: &'a Path,
+    paths: &[&str],
+) -> Result<StagedAside<'a>> {
+    let staged = repo::get_staged_files(repo)?
+        .into_iter()
+        .filter(|f| paths.contains(&f.as_str()))
+        .collect();
+    set_aside(workdir, staged)
+}
+
+fn set_aside(workdir: &Path, staged: Vec<String>) -> Result<StagedAside<'_>> {
     if staged.is_empty() {
         return Ok(StagedAside::new(workdir, String::new()));
     }
@@ -827,18 +865,11 @@ pub(crate) fn save_and_unstage_other_staged<'a>(
     workdir: &'a Path,
     target_files: &[&str],
 ) -> Result<StagedAside<'a>> {
-    let staged = repo::get_staged_files(repo)?;
-    let other: Vec<&str> = staged
-        .iter()
+    let other = repo::get_staged_files(repo)?
+        .into_iter()
         .filter(|f| !target_files.contains(&f.as_str()))
-        .map(|s| s.as_str())
         .collect();
-    if other.is_empty() {
-        return Ok(StagedAside::new(workdir, String::new()));
-    }
-    let patch = git::diff_cached_files(workdir, &other)?;
-    git::unstage_files(workdir, &other)?;
-    Ok(StagedAside::new(workdir, patch))
+    set_aside(workdir, other)
 }
 
 /// The single entry a submodule contributes to a picker: one object id, with no

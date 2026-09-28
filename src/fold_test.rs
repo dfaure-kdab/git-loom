@@ -1269,7 +1269,319 @@ fn fold_unstaged_clean_tree_fails() {
     );
 }
 
+fn show(test_repo: &TestRepo, rev: &str) -> String {
+    crate::git::run_git_stdout(&test_repo.workdir(), &["show", rev]).unwrap()
+}
+
+/// `reset --mixed HEAD~1` alone would unstage `z.txt` without saving it.
+#[test]
+fn fold_commit_to_unstaged_head_keeps_staged_work() {
+    let test_repo = TestRepo::new();
+    test_repo.commit("First commit", "file1.txt");
+    test_repo.commit("Second commit", "file2.txt");
+    test_repo.write_file("z.txt", "staged\n");
+    test_repo.stage_files(&["z.txt"]);
+    test_repo.write_file("z.txt", "staged\nunstaged\n");
+
+    super::fold_commit_to_unstaged(&test_repo.repo, &test_repo.head_oid().to_string()).unwrap();
+
+    assert_eq!(test_repo.get_message(0), "First commit");
+    assert_eq!(test_repo.status_porcelain(), "AM z.txt\n?? file2.txt\n");
+    assert_eq!(test_repo.read_file("z.txt"), "staged\nunstaged\n");
+}
+
+/// The staged patch is taken against HEAD, so after the reset it has to merge
+/// back onto the parent's version of the file.
+#[test]
+fn fold_commit_to_unstaged_head_restages_an_edit_to_its_own_file() {
+    let test_repo = TestRepo::new();
+    let lines: String = (1..=20).map(|i| format!("L{i}\n")).collect();
+    test_repo.commit_multi(&[("a.txt", lines.as_str())], "Base");
+    let committed = lines.replace("L2\n", "L2-COMMIT\n");
+    test_repo.commit_multi(&[("a.txt", committed.as_str())], "Change a");
+    let staged = committed.replace("L10\n", "L10-STAGED\n");
+    test_repo.write_file("a.txt", &staged);
+    test_repo.stage_files(&["a.txt"]);
+
+    super::fold_commit_to_unstaged(&test_repo.repo, &test_repo.head_oid().to_string()).unwrap();
+
+    assert_eq!(test_repo.get_message(0), "Base");
+    assert_eq!(test_repo.status_porcelain(), "MM a.txt\n");
+    assert_eq!(test_repo.read_file("a.txt"), staged);
+    assert_eq!(
+        show(&test_repo, ":a.txt"),
+        lines.replace("L10\n", "L10-STAGED\n")
+    );
+}
+
+/// A staged edit overlapping the uncommitted change cannot merge back onto the
+/// parent; it must park alone, not take unrelated staging with it.
+#[test]
+fn fold_commit_to_unstaged_head_parks_only_a_conflicting_staged_edit() {
+    let test_repo = TestRepo::new();
+    test_repo.commit_multi(&[("a.txt", "a\n")], "Base");
+    test_repo.commit_multi(&[("a.txt", "a2\n")], "Change a");
+    test_repo.write_file("a.txt", "a3\n");
+    test_repo.write_file("s.txt", "s\n");
+    test_repo.stage_files(&["a.txt", "s.txt"]);
+
+    super::fold_commit_to_unstaged(&test_repo.repo, &test_repo.head_oid().to_string()).unwrap();
+
+    assert_eq!(test_repo.get_message(0), "Base");
+    assert_eq!(test_repo.status_porcelain(), " M a.txt\nA  s.txt\n");
+    let parked = test_repo.repo.path().join("loom/unrestored-staged-0.patch");
+    let parked = std::fs::read_to_string(parked).unwrap();
+    assert!(
+        parked.contains("+a3") && !parked.contains("s.txt"),
+        "{parked}"
+    );
+}
+
 // ── Case 5: CommitFile + Unstaged (Uncommit file) ─────────────────────────
+
+/// The amend commits the whole index, so staged `z.txt` would ride into HEAD.
+#[test]
+fn fold_commit_file_to_unstaged_head_keeps_staged_work() {
+    let test_repo = TestRepo::new();
+    test_repo.write_file("file1.txt", "content1");
+    test_repo.write_file("file2.txt", "content2");
+    test_repo.stage_files(&["file1.txt", "file2.txt"]);
+    test_repo.commit_staged("Two files");
+    test_repo.write_file("z.txt", "staged\n");
+    test_repo.stage_files(&["z.txt"]);
+    test_repo.write_file("z.txt", "staged\nunstaged\n");
+    let head_oid = test_repo.head_oid();
+
+    super::fold_commit_file_to_unstaged(&test_repo.repo, &head_oid.to_string(), "file1.txt", &[])
+        .unwrap();
+
+    assert_eq!(
+        test_repo.commit_file_paths(test_repo.head_oid()),
+        vec!["file2.txt"]
+    );
+    assert_eq!(test_repo.status_porcelain(), "AM z.txt\n?? file1.txt\n");
+    assert_eq!(test_repo.read_file("z.txt"), "staged\nunstaged\n");
+}
+
+/// A rejected amend rolls back after the staged work was set aside, so the
+/// rollback must bring back the staging as well.
+#[cfg(unix)]
+#[test]
+fn fold_commit_file_to_unstaged_head_rollback_keeps_staged_work() {
+    let test_repo = TestRepo::new();
+    test_repo.commit_multi(&[("a.txt", "a\n"), ("b.txt", "b\n")], "Base");
+    test_repo.commit_multi(&[("a.txt", "a2\n"), ("b.txt", "b2\n")], "Two files");
+    test_repo.write_file("b.txt", "b3\n");
+    test_repo.write_file("z.txt", "z\n");
+    test_repo.stage_files(&["b.txt", "z.txt"]);
+    test_repo.write_file("z.txt", "z\nunstaged\n");
+    test_repo.write_file("n.txt", "n\n");
+    crate::git::run_git(&test_repo.workdir(), &["add", "-N", "n.txt"]).unwrap();
+    test_repo.install_hook("pre-commit", "exit 1\n");
+    let head_oid = test_repo.head_oid();
+    let status = test_repo.status_porcelain();
+
+    super::fold_commit_file_to_unstaged(&test_repo.repo, &head_oid.to_string(), "a.txt", &[])
+        .expect_err("the hook should block the amend");
+
+    assert_eq!(test_repo.head_oid(), head_oid);
+    assert_eq!(test_repo.status_porcelain(), status);
+    assert_eq!(show(&test_repo, ":b.txt"), "b3\n");
+    assert_eq!(show(&test_repo, ":z.txt"), "z\n");
+    assert_eq!(test_repo.read_file("z.txt"), "z\nunstaged\n");
+}
+
+/// The rollback resets `path` rather than restoring it from HEAD, which a
+/// file HEAD deletes is absent from.
+#[cfg(unix)]
+#[test]
+fn fold_commit_file_to_unstaged_head_rollback_of_a_deletion() {
+    let test_repo = TestRepo::new();
+    test_repo.commit_multi(&[("d.txt", "d\n"), ("k.txt", "k\n")], "Base");
+    std::fs::remove_file(test_repo.workdir().join("d.txt")).unwrap();
+    test_repo.write_file("k.txt", "k2\n");
+    test_repo.stage_files(&["d.txt", "k.txt"]);
+    test_repo.commit_staged("Delete d");
+    test_repo.install_hook("pre-commit", "exit 1\n");
+    let head_oid = test_repo.head_oid();
+
+    super::fold_commit_file_to_unstaged(&test_repo.repo, &head_oid.to_string(), "d.txt", &[])
+        .expect_err("the hook should block the amend");
+
+    assert_eq!(test_repo.head_oid(), head_oid);
+    assert_eq!(test_repo.status_porcelain(), "");
+    assert!(
+        crate::git::ls_files(&test_repo.workdir(), &["d.txt"])
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Once the uncommit brings the entry back, a staged re-add cannot be restored
+/// over it, and would take all staged work down with it.
+#[test]
+fn fold_commit_file_to_unstaged_head_refuses_a_staged_re_add_of_its_deletion() {
+    let test_repo = TestRepo::new();
+    test_repo.commit_multi(&[("d.txt", "d\n"), ("k.txt", "k\n")], "Base");
+    std::fs::remove_file(test_repo.workdir().join("d.txt")).unwrap();
+    test_repo.write_file("k.txt", "k2\n");
+    test_repo.stage_files(&["d.txt", "k.txt"]);
+    test_repo.commit_staged("Delete d");
+    test_repo.write_file("d.txt", "new d\n");
+    test_repo.write_file("s.txt", "s\n");
+    test_repo.stage_files(&["d.txt", "s.txt"]);
+    let head_oid = test_repo.head_oid();
+
+    let err =
+        super::fold_commit_file_to_unstaged(&test_repo.repo, &head_oid.to_string(), "d.txt", &[])
+            .expect_err("a staged re-add must be refused");
+
+    assert!(err.to_string().contains("back in the index"), "{err}");
+    assert_eq!(test_repo.head_oid(), head_oid);
+    assert_eq!(test_repo.status_porcelain(), "A  d.txt\nA  s.txt\n");
+}
+
+/// A staged edit overlapping the uncommitted change cannot merge back onto the
+/// parent; it must park alone, not take unrelated staging with it.
+#[test]
+fn fold_commit_file_to_unstaged_head_parks_only_a_conflicting_staged_edit() {
+    let test_repo = TestRepo::new();
+    test_repo.commit_multi(&[("a.txt", "a\n"), ("k.txt", "k\n")], "Base");
+    test_repo.commit_multi(&[("a.txt", "a2\n"), ("k.txt", "k2\n")], "Two files");
+    test_repo.write_file("a.txt", "a3\n");
+    test_repo.write_file("s.txt", "s\n");
+    test_repo.stage_files(&["a.txt", "s.txt"]);
+
+    super::fold_commit_file_to_unstaged(
+        &test_repo.repo,
+        &test_repo.head_oid().to_string(),
+        "a.txt",
+        &[],
+    )
+    .unwrap();
+
+    assert_eq!(show(&test_repo, "HEAD:a.txt"), "a\n");
+    assert_eq!(test_repo.status_porcelain(), " M a.txt\nA  s.txt\n");
+    assert_eq!(test_repo.read_file("a.txt"), "a3\n");
+    let parked = test_repo.repo.path().join("loom/unrestored-staged-0.patch");
+    let parked = std::fs::read_to_string(parked).unwrap();
+    assert!(
+        parked.contains("+a3") && !parked.contains("s.txt"),
+        "{parked}"
+    );
+}
+
+/// When HEAD cannot be put back, restaging over it would merge the patch into
+/// the wrong base, so it is parked instead.
+#[cfg(unix)]
+#[test]
+fn fold_commit_file_to_unstaged_head_parks_staged_work_when_the_reset_fails() {
+    let test_repo = TestRepo::new();
+    test_repo.commit_multi(&[("a.txt", "a\n"), ("b.txt", "b\n")], "Base");
+    test_repo.commit_multi(&[("a.txt", "a2\n"), ("b.txt", "b2\n")], "Two files");
+    test_repo.write_file("z.txt", "z\n");
+    test_repo.stage_files(&["z.txt"]);
+    let branch = test_repo.current_branch_name();
+    // The lock outlives the hook and blocks the reset's update of the branch.
+    test_repo.install_hook(
+        "pre-commit",
+        &format!("touch \"$(git rev-parse --git-dir)/refs/heads/{branch}.lock\"\nexit 1\n"),
+    );
+
+    let err = super::fold_commit_file_to_unstaged(
+        &test_repo.repo,
+        &test_repo.head_oid().to_string(),
+        "a.txt",
+        &[],
+    )
+    .expect_err("the hook should block the amend");
+
+    assert!(!err.to_string().contains("rolled back"), "{err}");
+    let parked = test_repo.repo.path().join("loom/unrestored-staged-0.patch");
+    assert!(std::fs::read_to_string(parked).unwrap().contains("+z"));
+    assert!(test_repo.status_porcelain().contains("?? z.txt"));
+}
+
+/// An intent-to-add entry is not in the set-aside patch, so unstaging it
+/// would leave the file untracked.
+#[test]
+fn fold_commit_file_to_unstaged_head_keeps_an_intent_to_add_entry() {
+    let test_repo = TestRepo::new();
+    test_repo.commit_multi(&[("a.txt", "a\n"), ("b.txt", "b\n")], "Base");
+    test_repo.commit_multi(&[("a.txt", "a2\n"), ("b.txt", "b2\n")], "Two files");
+    test_repo.write_file("n.txt", "n\n");
+    crate::git::run_git(&test_repo.workdir(), &["add", "-N", "n.txt"]).unwrap();
+
+    super::fold_commit_file_to_unstaged(
+        &test_repo.repo,
+        &test_repo.head_oid().to_string(),
+        "a.txt",
+        &[],
+    )
+    .unwrap();
+
+    assert_eq!(test_repo.status_porcelain(), " M a.txt\n A n.txt\n");
+}
+
+#[test]
+fn fold_commit_file_to_unstaged_head_takes_a_binary_file_out() {
+    let test_repo = TestRepo::new();
+    let workdir = test_repo.workdir();
+    std::fs::write(workdir.join("b.bin"), b"\0one").unwrap();
+    test_repo.write_file("k.txt", "k\n");
+    test_repo.stage_files(&["b.bin", "k.txt"]);
+    test_repo.commit_staged("Base");
+    std::fs::write(workdir.join("b.bin"), b"\0two").unwrap();
+    test_repo.write_file("k.txt", "k2\n");
+    test_repo.stage_files(&["b.bin", "k.txt"]);
+    test_repo.commit_staged("Binary and text");
+
+    super::fold_commit_file_to_unstaged(
+        &test_repo.repo,
+        &test_repo.head_oid().to_string(),
+        "b.bin",
+        &[],
+    )
+    .unwrap();
+
+    assert_eq!(
+        test_repo.commit_file_paths(test_repo.head_oid()),
+        vec!["k.txt"]
+    );
+    assert_eq!(test_repo.status_porcelain(), " M b.bin\n");
+    assert_eq!(std::fs::read(workdir.join("b.bin")).unwrap(), b"\0two");
+}
+
+/// Staging the reverse-applied file by path swept the user's own edits to it,
+/// staged or not, into the amend.
+#[test]
+fn fold_commit_file_to_unstaged_head_keeps_edits_to_that_file_out() {
+    let test_repo = TestRepo::new();
+    let lines: String = (1..=20).map(|i| format!("L{i}\n")).collect();
+    test_repo.commit_multi(&[("a.txt", lines.as_str())], "Base");
+    let committed = lines.replace("L2\n", "L2-COMMIT\n");
+    test_repo.write_file("a.txt", &committed);
+    test_repo.write_file("b.txt", "b\n");
+    test_repo.stage_files(&["a.txt", "b.txt"]);
+    test_repo.commit_staged("Two files");
+    let staged = committed.replace("L10\n", "L10-STAGED\n");
+    test_repo.write_file("a.txt", &staged);
+    test_repo.stage_files(&["a.txt"]);
+    let worktree = staged.replace("L18\n", "L18-UNSTAGED\n");
+    test_repo.write_file("a.txt", &worktree);
+    let head_oid = test_repo.head_oid();
+
+    super::fold_commit_file_to_unstaged(&test_repo.repo, &head_oid.to_string(), "a.txt", &[])
+        .unwrap();
+
+    assert_eq!(show(&test_repo, "HEAD:a.txt"), lines);
+    assert_eq!(test_repo.status_porcelain(), "MM a.txt\n");
+    assert_eq!(test_repo.read_file("a.txt"), worktree);
+    assert_eq!(
+        show(&test_repo, ":a.txt"),
+        lines.replace("L10\n", "L10-STAGED\n")
+    );
+}
 
 #[test]
 fn fold_commit_file_to_unstaged_head() {
