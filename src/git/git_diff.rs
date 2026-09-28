@@ -154,36 +154,29 @@ pub fn diff_commit_file_is_binary(workdir: &Path, oid: &str, path: &str) -> Resu
 }
 
 /// List files changed in a commit as `(status_char, path)` pairs
-/// (`git diff --no-renames --name-status <oid>^..<oid>`).
+/// (`git diff -z --no-renames --name-status <oid>^..<oid>`).
 ///
 /// `--no-renames` because a rename would list only its new path, and a caller
 /// rebuilding the commit from these entries would never delete the old one.
+/// `-z` because the default `core.quotePath` would otherwise escape and quote
+/// a non-ASCII path into something no other git command takes.
 pub fn diff_commit_name_status(workdir: &Path, oid: &str) -> Result<Vec<(char, String)>> {
     let out = diff_stdout(
         workdir,
         &[
+            "-z",
             "--no-renames",
             "--name-status",
             &format!("{}^..{}", oid, oid),
         ],
     )?;
+    // Records are `<status>\0<path>\0`: with renames off, never a second path.
     let mut result = Vec::new();
-    for line in out.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+    let mut fields = out.split('\0');
+    while let (Some(status_field), Some(path)) = (fields.next(), fields.next()) {
+        if let Some(status) = status_field.chars().next() {
+            result.push((status, path.to_string()));
         }
-        let Some((status_field, path)) = line.split_once('\t') else {
-            continue;
-        };
-        let path = path.trim();
-        let Some(status) = status_field.chars().next() else {
-            continue;
-        };
-        if path.is_empty() {
-            continue;
-        }
-        result.push((status, path.to_string()));
     }
     Ok(result)
 }
