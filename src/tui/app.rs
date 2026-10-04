@@ -799,7 +799,7 @@ fn execute_action(
         Action::NewBranch { name, target } => branch::new::run(Some(name), target),
         Action::Drop { targets } => drop::run(targets, false),
         Action::Absorb { files } => absorb::run(false, files, vec![]),
-        Action::Reword { target, name } => reword::run(target, name),
+        Action::Reword { target, name } => reword::run(target, name, vec![]),
         Action::Update => update::run(false),
         Action::Push { branch } => push::run(branch, false, false),
         // `push` itself confirms a force under the TUI, naming every branch.
