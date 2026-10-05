@@ -883,3 +883,20 @@ fn describe_commit_names_persistent_ids_and_falls_back_to_the_hash() {
         format!("`{}`", short(oid))
     );
 }
+
+#[test]
+fn describe_rewritten_leads_with_the_persistent_id() {
+    let test_repo = TestRepo::new_with_remote();
+    let plain = test_repo.commit("Plain", "p.txt");
+    let with_id = test_repo.commit(&format!("Identified\n\nChange-Id: {ID_A}\n"), "a.txt");
+    let old = "1234567890abcdef";
+
+    assert_eq!(
+        repo::describe_rewritten(&test_repo.workdir(), old, &with_id.to_string()),
+        format!("`wpn` (was: 1234567, now: {})", &with_id.to_string()[..7])
+    );
+    assert_eq!(
+        repo::describe_rewritten(&test_repo.workdir(), old, &plain.to_string()),
+        format!("`1234567` (now `{}`)", &plain.to_string()[..7])
+    );
+}

@@ -108,7 +108,9 @@ A message from `commit`, `split`, `reword`, or `fold` naming a commit it
 created or rewrote gives its persistent short ID before the hash,
 `` `mqt` (1a2b3c4) ``, when the commit has one (Spec 002); the ID survives
 later rewrites, so the agent can chain commands on it without re-running
-`status`. A commit without a Change-Id is named by hash alone; `swap` and
+`status`. A commit that `reword` or `fold` rewrote keeps its ID, so it is
+named `` `mqt` (was: 1a2b3c4, now: 5d6e7f8) ``. A commit without a Change-Id is named
+by hash alone (`` `1a2b3c4` (now `5d6e7f8`) `` when rewritten); `swap` and
 `drop` name commits by hash.
 
 ```json

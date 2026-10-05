@@ -201,7 +201,7 @@ A branch that ended at `mqt` (a stacked branch) stays behind: it ends at the com
 
 ```bash
 git loom fold mqt feature-b
-# ✓ Moved `a337eda` to branch `feature-b` (now `mqt` (e1f2a3b))
+# ✓ Moved `mqt` (was: a337eda, now: e1f2a3b) to branch `feature-b`
 #   › branch feature-x now empty, at the base
 ```
 
@@ -386,7 +386,7 @@ git loom fold mqt feature-b
 
 ```bash
 git add <resolved-files> && git loom continue
-# ✓ Moved `a337eda` to branch `feature-b` (now `mqt` (e1f2a3b))
+# ✓ Moved `mqt` (was: a337eda, now: e1f2a3b) to branch `feature-b`
 ```
 
 The following fold operations **do not** support pause/resume and abort immediately on conflict:

@@ -655,15 +655,33 @@ pub struct FileChange {
 /// printed even when the graph cannot be gathered.
 pub fn describe_commit(workdir: &Path, hash: &str) -> String {
     let short = crate::git::short_hash(hash);
-    let persistent = || -> Option<String> {
-        let repo = Repository::discover(workdir).ok()?;
-        let oid = repo.revparse_single(hash).ok()?.peel_to_commit().ok()?.id();
-        let info = gather_commit_graph(&repo).ok()?;
-        let ids = crate::core::shortid::IdAllocator::new(info.collect_entities());
-        let id = ids.get_commit(oid);
-        crate::core::changeid::is_letters(id).then(|| format!("`{id}` ({short})"))
-    };
-    persistent().unwrap_or_else(|| format!("`{short}`"))
+    match persistent_id(workdir, hash) {
+        Some(id) => format!("`{id}` ({short})"),
+        None => format!("`{short}`"),
+    }
+}
+
+/// How success messages name a commit they rewrote (Spec 019):
+/// `` `mqt` (was: 1a2b3c4, now: 5d6e7f8) `` when it has a persistent ID, else
+/// `` `1a2b3c4` (now `5d6e7f8`) ``.
+pub fn describe_rewritten(workdir: &Path, old_hash: &str, new_hash: &str) -> String {
+    let old = crate::git::short_hash(old_hash);
+    let new = crate::git::short_hash(new_hash);
+    match persistent_id(workdir, new_hash) {
+        Some(id) => format!("`{id}` (was: {old}, now: {new})"),
+        None => format!("`{old}` (now `{new}`)"),
+    }
+}
+
+/// The commit's persistent short ID (Spec 002), if it has one and the graph
+/// can be gathered.
+pub fn persistent_id(workdir: &Path, hash: &str) -> Option<String> {
+    let repo = Repository::discover(workdir).ok()?;
+    let oid = repo.revparse_single(hash).ok()?.peel_to_commit().ok()?.id();
+    let info = gather_commit_graph(&repo).ok()?;
+    let ids = crate::core::shortid::IdAllocator::new(info.collect_entities());
+    let id = ids.get_commit(oid);
+    crate::core::changeid::is_letters(id).then(|| id.to_string())
 }
 
 /// Whether the repo has an integration context: HEAD on a branch that has an
