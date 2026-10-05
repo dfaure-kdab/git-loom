@@ -99,6 +99,13 @@ setup_repo_with_remote() {
     git -C "$WORK" config user.email "test@test.com"
     git -C "$WORK" config user.name "Test"
     git -C "$WORK" config core.autocrlf false
+    # Settings loom reads: the tests expect the defaults, whatever ~/.gitconfig says
+    git -C "$WORK" config loom.changeId true
+    git -C "$WORK" config loom.hideBranchPattern local-
+    git -C "$WORK" config loom.statusContext 1
+    git -C "$WORK" config loom.pruneGoneBranches false
+    git -C "$WORK" config gerrit.createChangeId true
+    git -C "$WORK" config gerrit.reviewUrl ""
 
     # Integration branch tracking origin/<default>
     git -C "$WORK" checkout -q -b integration

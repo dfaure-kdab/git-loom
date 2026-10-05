@@ -152,6 +152,14 @@ impl TestRepo {
         config
             .set_str("core.hooksPath", &hooks.replace('\\', "/"))
             .unwrap();
+        // Settings loom reads change what it does on purpose; tests expect the
+        // defaults whatever the developer's config says.
+        config.set_bool("loom.changeId", true).unwrap();
+        config.set_str("loom.hideBranchPattern", "local-").unwrap();
+        config.set_i32("loom.statusContext", 1).unwrap();
+        config.set_bool("loom.pruneGoneBranches", false).unwrap();
+        config.set_bool("gerrit.createChangeId", true).unwrap();
+        config.set_str("gerrit.reviewUrl", "").unwrap();
     }
 
     /// Get the signature used for commits.

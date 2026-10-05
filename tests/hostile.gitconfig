@@ -1,6 +1,6 @@
 # A user gitconfig built to break scripts that shell out to git.
 #
-# CI runs the whole test suite with `GIT_CONFIG_GLOBAL` pointing here, so every
+# CI installs it as ~/.gitconfig and runs the whole test suite, so every
 # git-loom invocation meets settings real users have: output shaped differently,
 # rebase and commit behavior altered, the editor refusing to run. Nothing here
 # is exotic — each key is one someone sets on purpose.
@@ -106,3 +106,18 @@
 
 [gc]
 	auto = 0
+
+[loom]
+	# loom's own settings, away from their defaults: the test fixtures must pin
+	# every one a test relies on. Absent: `remote-type` and `push-remote`, which
+	# have no value meaning "unset" for a fixture to pin.
+	pruneGoneBranches = true
+	statusContext = 3
+	hideBranchPattern = ""
+	changeId = false
+
+[gerrit]
+	# Read by loom too. `createChangeId` turns its Change-Id off; `reviewUrl`
+	# makes it write a `Link:` trailer instead, wherever Change-Ids are on.
+	createChangeId = false
+	reviewUrl = https://hostile.example.com/

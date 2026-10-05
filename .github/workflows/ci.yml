@@ -48,11 +48,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # git-loom shells out to git constantly, so a user's gitconfig can change
       # what it reads back. These steps are the suite again, this time with
-      # a global config built to break it — see tests/hostile.gitconfig. The
-      # variable is set per step, not per job, to keep it away from `checkout`.
+      # a global config built to break it — see tests/hostile.gitconfig. It is
+      # installed as ~/.gitconfig, after `checkout`, because the repositories
+      # loom opens through libgit2 ignore `GIT_CONFIG_GLOBAL`.
+      - run: cp tests/hostile.gitconfig ~/.gitconfig
       - run: cargo test --locked
-        env:
-          GIT_CONFIG_GLOBAL: ${{ github.workspace }}/tests/hostile.gitconfig
       - run: bash test-integration.sh
-        env:
-          GIT_CONFIG_GLOBAL: ${{ github.workspace }}/tests/hostile.gitconfig
