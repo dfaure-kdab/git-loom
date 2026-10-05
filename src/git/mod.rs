@@ -43,7 +43,7 @@ pub use git_rebase::{
 pub use git_worktree::{Worktree, ensure_not_checked_out_elsewhere, list_worktrees};
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -66,8 +66,9 @@ use crate::trace as loom_trace;
 /// - `rebase.missingCommitsCheck` refuses (`error`) or complains (`warn`) about
 ///   the todo lists loom builds that leave commits out on purpose.
 ///
-/// Left alone on purpose: `run_git_interactive` (what the user reads is theirs
-/// to configure), `git push` and `git check-ref-format` (no parsed output).
+/// Left alone on purpose: `run_git_interactive` and `run_git_paged` (what the
+/// user reads is theirs to configure), `git push` and `git check-ref-format`
+/// (no parsed output).
 /// Color is not here either: `color.ui` is only a default an explicit
 /// `color.diff=always` beats, so the diff helpers pass `--no-color`.
 pub const FORCED_CONFIG: &[&str] = &[
@@ -249,10 +250,35 @@ fn parse_git_version(version_str: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-/// Run a git command with inherited stdio (for interactive commands / pager).
+/// Run a git command with inherited stdio (for interactive commands).
 /// stderr is not captured, so the trace log records it empty for these calls.
 /// In TUI mode the terminal is handed back to the user for the duration.
 pub fn run_git_interactive(workdir: &Path, args: &[&str]) -> Result<()> {
+    run_interactive(workdir, args, |status| status.success())
+}
+
+/// `run_git_interactive` for output read in a pager (`show`, `diff`).
+pub fn run_git_paged(workdir: &Path, args: &[&str]) -> Result<()> {
+    run_interactive(workdir, args, |status| {
+        status.success() || pager_quit_early(status)
+    })
+}
+
+/// Git dies from SIGPIPE when the pager quits before reading all output, or
+/// exits 141 where it cannot raise that signal (Windows, a wrapper shell).
+fn pager_quit_early(status: ExitStatus) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        const SIGPIPE: i32 = 13;
+        if status.signal() == Some(SIGPIPE) {
+            return true;
+        }
+    }
+    status.code() == Some(141)
+}
+
+fn run_interactive(workdir: &Path, args: &[&str], ok: fn(ExitStatus) -> bool) -> Result<()> {
     // A pty-hosted agent must never hang inside `less` — disable the pager.
     let mut full_args: Vec<&str> = Vec::new();
     if crate::core::agent_mode::enabled() {
@@ -274,9 +300,9 @@ pub fn run_git_interactive(workdir: &Path, args: &[&str]) -> Result<()> {
 
     let duration_ms = start.elapsed().as_millis();
     let cmd = args.join(" ");
-    loom_trace::log_command("git", &cmd, duration_ms, status.success(), "");
+    loom_trace::log_command("git", &cmd, duration_ms, ok(status), "");
 
-    if !status.success() {
+    if !ok(status) {
         bail!("git {} failed", args[0]);
     }
 

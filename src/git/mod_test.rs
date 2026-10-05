@@ -132,3 +132,18 @@ fn git_never_prompts_on_the_terminal_under_the_tui() {
     ui::uninstall();
     assert_eq!(under_tui.as_deref(), Some(OsStr::new("0")));
 }
+
+/// `q` in `less` before the end of a long `loom show` must not report a failure.
+#[test]
+#[cfg(unix)]
+fn a_pager_quit_is_not_a_failure() {
+    use super::pager_quit_early;
+    use std::process::Command;
+
+    let status = |script: &str| Command::new("sh").args(["-c", script]).status().unwrap();
+
+    assert!(pager_quit_early(status("kill -PIPE $$")));
+    assert!(pager_quit_early(status("exit 141")));
+    assert!(!pager_quit_early(status("exit 1")));
+    assert!(!pager_quit_early(status("kill -TERM $$")));
+}

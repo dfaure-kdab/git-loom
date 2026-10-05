@@ -196,6 +196,18 @@ commit_file "Bogus option commit" "bogus.txt"
 gl_capture show -- --definitely-not-a-git-option
 assert_exit_fail "$CODE" "show_bogus_option_fails"
 
+# ── PAGER ─────────────────────────────────────────────────────────────────────
+
+# git pages only on a tty, and dies from SIGPIPE when the pager exits unread.
+describe "a pager that quits early is not a failure"
+setup_repo_with_remote
+seq 1 200000 > "$WORK/big.txt"
+git -C "$WORK" add big.txt
+git -C "$WORK" commit -q -m "Big commit"
+code=0
+(cd "$WORK" && GIT_PAGER=true script -qec "$(printf %q "$GL_BIN") show HEAD" /dev/null > /dev/null) || code=$?
+assert_eq "$code" "0" "show_pager_quit_ok"
+
 # ── ALIAS ─────────────────────────────────────────────────────────────────────
 
 describe "gl sh alias works identically to gl show"
