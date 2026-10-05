@@ -58,7 +58,7 @@ pub fn run(args: Vec<String>, staged: bool, all: bool, git_args: Vec<String>) ->
     }
 
     let refs: Vec<&str> = cmd.iter().map(|s| s.as_str()).collect();
-    git::run_git_interactive(workdir, &refs)
+    git::run_git_paged(workdir, &refs)
 }
 
 /// Resolve a commit reference leniently: tries short ID and direct ref resolution.

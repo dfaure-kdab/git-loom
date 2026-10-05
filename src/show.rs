@@ -22,7 +22,7 @@ pub fn run(target: Option<String>, git_args: Vec<String>) -> Result<()> {
     args.extend(git_args);
 
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    git::run_git_interactive(workdir, &refs)
+    git::run_git_paged(workdir, &refs)
 }
 
 /// Resolve a target into the revisions to pass to `git show`, newest first.
