@@ -203,9 +203,8 @@ pub fn after_continue(
 
 fn report_reworded(workdir: &Path, ctx: &RewordContext) {
     msg::success(&format!(
-        "Updated commit message for `{}` (now {})",
-        ctx.display,
-        repo::describe_commit(workdir, &ctx.new_hash)
+        "Updated commit message for {}",
+        repo::describe_rewritten(workdir, &ctx.display, &ctx.new_hash)
     ));
 }
 

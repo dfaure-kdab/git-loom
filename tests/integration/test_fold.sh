@@ -280,8 +280,10 @@ commit_file "Fixup source" "fixup-s.txt"
 source_sid=$(commit_sid_from_status "Fixup source")
 target_sid=$(commit_sid_from_status "Fixup target")
 source_hash="$(head_hash)"
+target_hash=$(git -C "$WORK" rev-parse HEAD~1)
 out=$(gl fold "$source_sid" "$target_sid")
 assert_exit_ok $? "fixup_short_id_ok"
+assert_contains "$out" "into ${target_hash:0:7} (now $(head_hash | cut -c1-7))" "fixup_short_id_names_target"
 assert_commit_not_in_log "$source_hash" "fixup_short_id_source_gone"
 assert_head_msg "Fixup target" "fixup_short_id_msg_preserved"
 
@@ -333,8 +335,10 @@ commit_file "Dst existing" "dst-existing.txt"
 switch_to integration
 weave_branch "h-move-dst"
 move_sid=$(commit_sid_from_status "Move me")
+move_hash=$(git -C "$WORK" rev-parse g-move-src)
 out=$(gl fold "$move_sid" h-move-dst)
 assert_exit_ok $? "move_branch_name_ok"
+assert_contains "$out" "Moved ${move_hash:0:7} (now $(git -C "$WORK" rev-parse --short=7 h-move-dst)) to branch h-move-dst" "move_branch_name_names_commit"
 assert_contains "$(git -C "$WORK" log h-move-dst --oneline)" "Move me" "move_branch_name_on_dst"
 # Commit should no longer be in g-move-src's unique commits (not between src and its base)
 upstream_oid=$(upstream_oid)

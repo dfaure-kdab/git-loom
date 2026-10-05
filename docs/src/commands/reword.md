@@ -61,7 +61,7 @@ git loom reword osy -m "Fix authentication bug"
 #   `loom abort`      to cancel and restore original state
 
 git add shared.rs && git loom continue
-# ✓ Updated commit message for `ab12cd3` (now `mqt` (e45f678))
+# ✓ Updated commit message for `mqt` (was: ab12cd3, now: e45f678)
 ```
 
 With `rerere.autoUpdate` set too, git stages the replayed resolution, so there is nothing left to settle and the reword carries on by itself, saying what it took:
@@ -69,7 +69,7 @@ With `rerere.autoUpdate` set too, git stages the replayed resolution, so there i
 ```bash
 git loom reword osy -m "Fix authentication bug"
 # ! `rerere` resolved the conflicts replaying `ab12cd3` — carried on with its recorded resolution
-# ✓ Updated commit message for `ab12cd3` (now `mqt` (e45f678))
+# ✓ Updated commit message for `mqt` (was: ab12cd3, now: e45f678)
 ```
 
 `git loom abort` restores the original message, HEAD, and every branch ref. See [continue](continue.md) and [abort](abort.md).

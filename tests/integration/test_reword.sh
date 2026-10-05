@@ -25,7 +25,7 @@ out=$(gl reword HEAD --message "New message")
 assert_exit_ok $? "reword_head_ok"
 assert_head_msg "New message" "reword_head_msg"
 sid=$(commit_sid_from_status "New message")
-assert_contains "$out" "(now $sid (" "reword_names_persistent_id"
+assert_contains "$out" "for $sid (was: " "reword_names_persistent_id"
 
 describe "reword non-HEAD commit by full hash"
 setup_repo_with_remote

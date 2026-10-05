@@ -390,14 +390,14 @@ fn move_commits_and_report(
     let new_hash = git::rev_parse(workdir, branch_name)?;
     let mut message = if created {
         format!(
-            "Created branch `{}` and moved {} commit(s) to it (now {})",
+            "Created branch `{}` and moved {} commit(s) to it (tip: {})",
             branch_name,
             commit_hashes.len(),
             repo::describe_commit(workdir, &new_hash)
         )
     } else {
         format!(
-            "Moved {} commit(s) to branch `{}` (now {})",
+            "Moved {} commit(s) to branch `{}` (tip: {})",
             commit_hashes.len(),
             branch_name,
             repo::describe_commit(workdir, &new_hash)
@@ -614,11 +614,10 @@ fn report_moved_relative(
     parked: &[String],
 ) {
     let mut message = format!(
-        "Moved `{}` {} `{}` (now {})",
-        git::short_hash(commit_hash),
+        "Moved {} {} `{}`",
+        repo::describe_rewritten(workdir, commit_hash, new_hash),
         position.as_str(),
-        git::short_hash(target_hash),
-        repo::describe_commit(workdir, new_hash)
+        git::short_hash(target_hash)
     );
     if !parked.is_empty() {
         message.push_str(&format!(
@@ -1018,11 +1017,9 @@ fn run_patch_fold_commit_to_commit(
     )?;
 
     msg::success(&format!(
-        "Moved hunk(s) from `{}` (now {}) into `{}` (now {})",
-        git::short_hash(source_hash),
-        repo::describe_commit(workdir, &new_source_hash),
-        git::short_hash(target_hash),
-        repo::describe_commit(workdir, &new_target_hash)
+        "Moved hunk(s) from {} into {}",
+        repo::describe_rewritten(workdir, source_hash, &new_source_hash),
+        repo::describe_rewritten(workdir, target_hash, &new_target_hash)
     ));
 
     Ok(())
@@ -1354,9 +1351,8 @@ fn run_patch_fold_commit_to_unstaged(
     staged.sort();
 
     let mut message = format!(
-        "Uncommitted hunk(s) from `{}` (now {}) to working directory",
-        git::short_hash(commit_hash),
-        repo::describe_commit(workdir, &new_hash)
+        "Uncommitted hunk(s) from {} to working directory",
+        repo::describe_rewritten(workdir, commit_hash, &new_hash)
     );
     if !staged.is_empty() {
         let names: Vec<String> = staged.iter().map(|p| format!("`{p}`")).collect();
@@ -1711,10 +1707,9 @@ fn fold_files_into_commit(
     }
 
     msg::success(&format!(
-        "Folded {} file(s) into `{}` (now {})",
+        "Folded {} file(s) into {}",
         files.len(),
-        git::short_hash(commit_hash),
-        repo::describe_commit(workdir, &new_hash)
+        repo::describe_rewritten(workdir, commit_hash, &new_hash)
     ));
 
     Ok(())
@@ -1898,10 +1893,9 @@ fn fold_commit_into_commit(repo: &Repository, source_hash: &str, target_hash: &s
             let new_hash = git::rev_parse(workdir, TRACK_BRANCH)?;
             let _ = git::branch_delete(workdir, TRACK_BRANCH);
             msg::success(&format!(
-                "Folded `{}` into `{}` (now {})",
+                "Folded `{}` into {}",
                 git::short_hash(source_hash),
-                git::short_hash(target_hash),
-                repo::describe_commit(workdir, &new_hash)
+                repo::describe_rewritten(workdir, target_hash, &new_hash)
             ));
         }
         RebaseOutcome::Paused => {
@@ -1979,10 +1973,9 @@ fn report_moved(
     parked: &[String],
 ) {
     let mut message = format!(
-        "Moved `{}` to branch `{}` (now {})",
-        git::short_hash(commit_hash),
-        branch_name,
-        repo::describe_commit(workdir, new_hash)
+        "Moved {} to branch `{}`",
+        repo::describe_rewritten(workdir, commit_hash, new_hash),
+        branch_name
     );
     if !parked.is_empty() {
         message.push_str(&format!(
@@ -2252,10 +2245,9 @@ fn fold_commit_file_to_unstaged(
     }
 
     msg::success(&format!(
-        "Uncommitted `{}` from `{}` (now {}) {}",
+        "Uncommitted `{}` from {} {}",
         path,
-        git::short_hash(commit_hash),
-        repo::describe_commit(workdir, &new_hash),
+        repo::describe_rewritten(workdir, commit_hash, &new_hash),
         if staged_removal {
             "as a staged deletion"
         } else {
@@ -2532,12 +2524,10 @@ fn fold_commit_file_to_commit(
     git::restore_staged_after_rebase(workdir, &saved_worktree.staged);
 
     msg::success(&format!(
-        "Moved `{}` from `{}` (now {}) to `{}` (now {})",
+        "Moved `{}` from {} to {}",
         path,
-        git::short_hash(source_hash),
-        repo::describe_commit(workdir, &new_source_hash),
-        git::short_hash(target_hash),
-        repo::describe_commit(workdir, &new_target_hash)
+        repo::describe_rewritten(workdir, source_hash, &new_source_hash),
+        repo::describe_rewritten(workdir, target_hash, &new_target_hash)
     ));
 
     Ok(())
@@ -2699,10 +2689,9 @@ pub fn after_continue(
             let new_hash = git::rev_parse(workdir, TRACK_BRANCH)?;
             let _ = git::branch_delete(workdir, TRACK_BRANCH);
             msg::success(&format!(
-                "Folded {} file(s) into `{}` (now {})",
+                "Folded {} file(s) into {}",
                 files_count,
-                git::short_hash(&original_commit_hash),
-                repo::describe_commit(workdir, &new_hash)
+                repo::describe_rewritten(workdir, &original_commit_hash, &new_hash)
             ));
         }
         FoldVariant::CommitIntoCommit {
@@ -2712,10 +2701,9 @@ pub fn after_continue(
             let new_hash = git::rev_parse(workdir, TRACK_BRANCH)?;
             let _ = git::branch_delete(workdir, TRACK_BRANCH);
             msg::success(&format!(
-                "Folded `{}` into `{}` (now {})",
+                "Folded `{}` into {}",
                 git::short_hash(&source_hash),
-                git::short_hash(&target_hash),
-                repo::describe_commit(workdir, &new_hash)
+                repo::describe_rewritten(workdir, &target_hash, &new_hash)
             ));
         }
         FoldVariant::CommitToBranch {
