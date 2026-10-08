@@ -174,6 +174,8 @@ For a stacked branch, see [Stacked Branches](#stacked-branches). If `gh` is not 
 
 In a **fork workflow** (tracking `upstream/main`), pushes go to `origin` (your fork) and the PR targets the upstream repository automatically.
 
+With several GitHub accounts logged in to `gh`, loom runs `gh` as the account that owns the push remote (e.g. `you` for `git@github.com:you/repo`), so the active `gh` account does not matter. A `GH_TOKEN` you set yourself takes precedence.
+
 If the branch being pushed is the upstream target branch itself, PR creation is skipped.
 
 ### GitLab

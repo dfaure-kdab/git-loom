@@ -219,6 +219,9 @@ if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
     pass
 fi
 
+# A token in the environment would stop loom from picking the fork owner.
+unset GH_TOKEN GITHUB_TOKEN
+
 # Fake `gh`: records every invocation in $GH_LOG and keeps PR/stack state in
 # $GH_STATE so successive pushes see the PRs earlier ones created.
 install_gh_shim() {
@@ -230,12 +233,16 @@ install_gh_shim() {
     cat > "$GH_SHIM/gh" <<'SHIM'
 #!/usr/bin/env bash
 set -euo pipefail
-echo "$*" >> "$GH_LOG"
+echo "$*${GH_TOKEN:+ [token $GH_TOKEN]}" >> "$GH_LOG"
 arg_after() { local key="$1"; shift; while [[ $# -gt 1 ]]; do [[ "$1" == "$key" ]] && { echo "$2"; return; }; shift; done; echo ""; }
 repo="$(arg_after --repo "$@")"
 case "$1 ${2:-}" in
     "--version ")
         echo "gh version 9.9.9" ;;
+    "auth token")
+        # Logged-in accounts are $GH_STATE/account_<user>, holding the token.
+        user="$(arg_after --user "$@")"
+        cat "$GH_STATE/account_$user" ;;
     "pr list")
         # State files hold "<number> <base> <head owner>"; --head matches the
         # branch name whatever fork it lives in, like GitHub.
@@ -485,6 +492,8 @@ assert_contains "$log" "pr create --head forker:a --base $BASE_BRANCH --repo own
 assert_not_contains "$log" "pr edit" "gh_fork_no_retarget"
 assert_not_contains "$log" "pr view" "gh_fork_no_browser"
 assert_not_contains "$log" "stacks" "gh_fork_no_stack"
+assert_contains "$log" "auth token --user forker" "gh_fork_account_lookup"
+assert_not_contains "$log" "[token" "gh_fork_no_account_no_token"
 
 describe "github: a stranger's PR with the same branch name is left alone"
 # Someone else's fork has a branch `a` with an open PR against upstream.
@@ -495,5 +504,23 @@ assert_exit_ok "$CODE" "gh_stranger_ok"
 assert_contains "$OUT" "PR created: https://github.com/owner/repo/pull/3" "gh_stranger_created_ours"
 assert_contains "$OUT" "PR updated: https://github.com/owner/repo/pull/1" "gh_stranger_kept_b"
 assert_not_contains "$(cat "$GH_LOG")" "pr edit" "gh_stranger_not_edited"
+
+describe "github: gh acts as the fork owner when logged in to that account"
+echo "forker-token" > "$GH_STATE/account_forker"
+: > "$GH_LOG"
+gl_gh_capture push b
+assert_exit_ok "$CODE" "gh_account_ok"
+log="$(cat "$GH_LOG")"
+assert_contains "$log" "auth token --user forker" "gh_account_lookup"
+assert_contains "$log" "pr list --head a --repo owner/repo --json number,url,baseRefName,headRepositoryOwner --limit 30 [token forker-token]" "gh_account_used"
+assert_not_contains "$(gl trace)" "forker-token" "gh_account_not_traced"
+
+describe "github: a GH_TOKEN set by the user wins over the fork owner"
+: > "$GH_LOG"
+OUT=$(GH_TOKEN=user-token gl_gh push b 2>&1) && CODE=$? || CODE=$?
+assert_exit_ok "$CODE" "gh_user_token_ok"
+log="$(cat "$GH_LOG")"
+assert_not_contains "$log" "auth token" "gh_user_token_no_lookup"
+assert_contains "$log" "[token user-token]" "gh_user_token_used"
 
 pass

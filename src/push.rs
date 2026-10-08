@@ -1010,14 +1010,44 @@ fn push_plan(
     Ok(())
 }
 
-/// Run `gh` with `args` in `workdir`, trace-log it, and return stdout on
+/// The `gh` CLI in `workdir`, acting as the account that owns the head
+/// repository when `gh` is logged in to it, else as its active account.
+struct Gh<'a> {
+    workdir: &'a Path,
+    /// Passed as `GH_TOKEN` to every call.
+    token: Option<String>,
+}
+
+impl<'a> Gh<'a> {
+    /// A `GH_TOKEN`/`GITHUB_TOKEN` set by the user wins (Spec 011, gh account).
+    fn new(workdir: &'a Path, head_owner: Option<&str>) -> Self {
+        let mut gh = Gh {
+            workdir,
+            token: None,
+        };
+        let user_token = ["GH_TOKEN", "GITHUB_TOKEN"]
+            .iter()
+            .any(|var| std::env::var_os(var).is_some());
+        if let Some(owner) = head_owner.filter(|_| !user_token) {
+            gh.token = run_gh(&gh, &["auth", "token", "--user", owner], None)
+                .map(|token| token.trim().to_string())
+                .filter(|token| !token.is_empty());
+        }
+        gh
+    }
+}
+
+/// Run `gh` with `args`, trace-log it, and return stdout on
 /// success. Failures are logged (stderr goes to the trace) and yield `None`.
-fn run_gh(workdir: &Path, args: &[&str], stdin: Option<&str>) -> Option<String> {
+fn run_gh(gh: &Gh, args: &[&str], stdin: Option<&str>) -> Option<String> {
     use std::process::Stdio;
 
     let start = Instant::now();
     let mut cmd = Command::new("gh");
-    cmd.current_dir(workdir).args(args);
+    cmd.current_dir(gh.workdir).args(args);
+    if let Some(token) = &gh.token {
+        cmd.env("GH_TOKEN", token);
+    }
     // An inherited stdin would race `loom tui` for its keys.
     cmd.stdin(if stdin.is_some() {
         Stdio::piped()
@@ -1086,13 +1116,13 @@ fn parse_gh_pr_list(json: &str, head_owner: Option<&str>) -> Option<GhPr> {
 /// Find the open GitHub PR for `branch` whose head is in `head_owner`'s
 /// repository, if any.
 fn find_existing_github_pr(
-    workdir: &Path,
+    gh: &Gh,
     gh_repo: &str,
     branch: &str,
     head_owner: Option<&str>,
 ) -> Option<GhPr> {
     let stdout = run_gh(
-        workdir,
+        gh,
         &[
             "pr",
             "list",
@@ -1112,7 +1142,7 @@ fn find_existing_github_pr(
 
 /// Create a PR without opening the browser; returns it when `gh` succeeded.
 fn create_github_pr(
-    workdir: &Path,
+    gh: &Gh,
     gh_repo: &str,
     head: &str,
     base: &str,
@@ -1120,7 +1150,7 @@ fn create_github_pr(
     body: &str,
 ) -> Option<GhPr> {
     let stdout = run_gh(
-        workdir,
+        gh,
         &[
             "pr", "create", "--head", head, "--base", base, "--repo", gh_repo, "--title", title,
             "--body", body,
@@ -1136,10 +1166,10 @@ fn create_github_pr(
 }
 
 /// Point an existing PR at a different base branch.
-fn retarget_github_pr(workdir: &Path, gh_repo: &str, number: u64, base: &str) -> bool {
+fn retarget_github_pr(gh: &Gh, gh_repo: &str, number: u64, base: &str) -> bool {
     let number = number.to_string();
     run_gh(
-        workdir,
+        gh,
         &["pr", "edit", &number, "--repo", gh_repo, "--base", base],
         None,
     )
@@ -1186,9 +1216,9 @@ fn plan_stack_registration(memberships: &[Option<u64>]) -> StackAction {
 
 /// The `stack.number` of a PR resource, `Some(None)` when it is in no stack,
 /// `None` when the lookup failed.
-fn github_pr_stack(workdir: &Path, gh_repo: &str, number: u64) -> Option<Option<u64>> {
+fn github_pr_stack(gh: &Gh, gh_repo: &str, number: u64) -> Option<Option<u64>> {
     let path = format!("repos/{}/pulls/{}", gh_repo, number);
-    let stdout = run_gh(workdir, &["api", &path, "--jq", ".stack"], None)?;
+    let stdout = run_gh(gh, &["api", &path, "--jq", ".stack"], None)?;
     Some(parse_stack_number(&stdout))
 }
 
@@ -1224,10 +1254,10 @@ fn stack_pr_numbers(chain: &[(Layer, Option<u64>)]) -> Vec<u64> {
 ///
 /// Nothing is remembered locally: the stack membership of each PR is read
 /// back through the API on every push and reconciled.
-fn register_github_stack(workdir: &Path, gh_repo: &str, numbers: &[u64]) {
+fn register_github_stack(gh: &Gh, gh_repo: &str, numbers: &[u64]) {
     let memberships: Option<Vec<Option<u64>>> = numbers
         .iter()
-        .map(|n| github_pr_stack(workdir, gh_repo, *n))
+        .map(|n| github_pr_stack(gh, gh_repo, *n))
         .collect();
     let Some(memberships) = memberships else {
         msg::warn(
@@ -1267,7 +1297,7 @@ fn register_github_stack(workdir: &Path, gh_repo: &str, numbers: &[u64]) {
     };
 
     match run_gh(
-        workdir,
+        gh,
         &["api", "--method", "POST", &path, "--input", "-"],
         Some(&body),
     ) {
@@ -1367,6 +1397,7 @@ fn push_github(
             )
         })?
         .1;
+    let gh = Gh::new(workdir, head_owner.as_deref());
 
     let mut layers: Vec<(Layer, bool)> = plan
         .pr_layers()
@@ -1388,13 +1419,13 @@ fn push_github(
     let mut chain: Vec<(Layer, Option<u64>)> = Vec::new();
     for (layer, republish) in &layers {
         let pr = match find_existing_github_pr(
-            workdir,
+            &gh,
             pr_target_repo,
             &layer.branch,
             head_owner.as_deref(),
         ) {
             Some(pr) if pr.base != layer.base => {
-                if retarget_github_pr(workdir, pr_target_repo, pr.number, &layer.base) {
+                if retarget_github_pr(&gh, pr_target_repo, pr.number, &layer.base) {
                     msg::success(&format!(
                         "PR updated: {}\nRetargeted to `{}`",
                         pr.url, layer.base
@@ -1432,7 +1463,7 @@ fn push_github(
                 let (title, body) =
                     pr_title_and_description(repo, info, &layer.branch, &layer.base)?;
                 let pr = create_github_pr(
-                    workdir,
+                    &gh,
                     pr_target_repo,
                     &head_for(&layer.branch),
                     &layer.base,
@@ -1456,7 +1487,7 @@ fn push_github(
 
     let numbers = stack_pr_numbers(&chain);
     if register && numbers.len() >= 2 {
-        register_github_stack(workdir, pr_target_repo, &numbers);
+        register_github_stack(&gh, pr_target_repo, &numbers);
     }
 
     Ok(())
