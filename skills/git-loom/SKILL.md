@@ -57,10 +57,13 @@ Every entity in `graph` carries the `id` to pass back: `zz` = all local changes
 letters `k`–`z` such as `mqt` = commit with a Change-Id (persistent; any longer
 prefix of it also works); hex prefix such as `3ac` = commit without one
 (changes on every rewrite); `mqt:0` = the first file of commit `mqt`
-(with `status -f`, ids count from 0). Short IDs work wherever that entity is
-accepted; names, paths, and hashes also work. `status -a` includes hidden
-branches (`loom.hideBranchPattern`, default `local-`) and their commits. Never
-commit, fold, or move into a hidden branch unless the user names it: the result
+(with `status -f`, ids count from 0). Short IDs work in loom commands wherever
+that entity is accepted; names, paths, and hashes also work. Short IDs mean
+nothing to raw Git: inspect with `git loom show <id> --agent` /
+`git loom diff <id> --agent`, or pass Git the commit's `oid` from
+`git loom status --agent`. `status -a` includes hidden branches
+(`loom.hideBranchPattern`, default `local-`) and their commits. Never commit,
+fold, or move into a hidden branch unless the user names it: the result
 vanishes from their status.
 
 The `graph` fields:
