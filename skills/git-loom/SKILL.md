@@ -35,7 +35,8 @@ Rules:
    `commit`, explicitly choose `-b <branch>` or a loose commit on the integration branch `-l`.
 4. Name files explicitly. Never use `zz`, except as the destination in
    `git loom fold <commit> zz` (uncommit). In particular, never pass it to
-   `add`, `commit`, or `drop`; it includes unrelated local edits.
+   `add`, `commit`, or `drop`; it includes unrelated local edits. A directory
+   takes every untracked file under it too: check that each one belongs.
 5. Never pipe answers into prompts. In agent mode, re-invoke with explicit args.
 6. If a message says this skill differs from loom's shipped skill, run the named
    `git-loom agent install` command and tell the user to restart the session.
