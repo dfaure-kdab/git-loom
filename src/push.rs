@@ -1295,7 +1295,7 @@ fn push_github(ctx: &PrContext, has_gh: bool, report: &mut PushReport) -> Result
             )
         })?
         .1;
-    let gh = Gh::new(workdir, head_owner.as_deref());
+    let gh = Gh::new(workdir, extract_gh_repo(repo, remote).as_deref());
 
     let mut layers: Vec<(Layer, bool)> = plan
         .pr_layers()

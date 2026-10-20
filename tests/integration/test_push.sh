@@ -293,7 +293,7 @@ if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
     pass
 fi
 
-# A token in the environment would stop loom from picking the fork owner.
+# A token in the environment would stop loom from picking a gh account.
 unset GH_TOKEN GITHUB_TOKEN
 
 # Fake `gh`: records every invocation in $GH_LOG and keeps PR/stack state in
@@ -313,10 +313,17 @@ repo="$(arg_after --repo "$@")"
 case "$1 ${2:-}" in
     "--version ")
         echo "gh version 9.9.9" ;;
-    "auth token")
-        # Logged-in accounts are $GH_STATE/account_<user>, holding the token.
-        user="$(arg_after --user "$@")"
-        cat "$GH_STATE/account_$user" ;;
+    "auth status")
+        # Logged-in accounts are $GH_STATE/account_<user>, holding the token;
+        # $GH_STATE/active names the active one.
+        accounts=""
+        for f in "$GH_STATE"/account_*; do
+            [[ -f "$f" ]] || continue
+            user="${f##*/account_}"
+            active=false; [[ "$(cat "$GH_STATE/active" 2>/dev/null)" == "$user" ]] && active=true
+            accounts="$accounts${accounts:+,}{\"state\":\"success\",\"active\":$active,\"login\":\"$user\",\"token\":\"$(cat "$f")\"}"
+        done
+        echo "{\"hosts\":{\"github.com\":[$accounts]}}" ;;
     "pr list")
         # State files hold "<number> <base> <head owner>"; --head matches the
         # branch name whatever fork it lives in, like GitHub.
@@ -342,6 +349,13 @@ case "$1 ${2:-}" in
             read -r n _ < "$f"
             [[ "$n" == "$number" ]] && echo "$number $base" > "$f"
         done ;;
+    "api --hostname")
+        # gh api --hostname github.com repos/<repo> --jq .permissions.push:
+        # $GH_STATE/push_<token> lists the repos that token can push to, and
+        # $GH_STATE/hidden_<token> the ones it cannot see (a 404).
+        repo="${4#repos/}"
+        grep -qxF "$repo" "$GH_STATE/hidden_${GH_TOKEN:-}" 2>/dev/null && { echo "HTTP 404" >&2; exit 1; }
+        grep -qxF "$repo" "$GH_STATE/push_${GH_TOKEN:-}" 2>/dev/null && echo true || echo false ;;
     "api repos"*)
         # gh api repos/<repo>/pulls/<n> --jq .stack
         number="${2##*/}"
@@ -577,7 +591,6 @@ assert_contains "$log" "pr create --head forker:a --base $BASE_BRANCH --repo own
 assert_not_contains "$log" "pr edit" "gh_fork_no_retarget"
 assert_not_contains "$log" "pr view" "gh_fork_no_browser"
 assert_not_contains "$log" "stacks" "gh_fork_no_stack"
-assert_contains "$log" "auth token --user forker" "gh_fork_account_lookup"
 assert_not_contains "$log" "[token" "gh_fork_no_account_no_token"
 
 describe "github: a stranger's PR with the same branch name is left alone"
@@ -592,11 +605,15 @@ assert_not_contains "$(cat "$GH_LOG")" "pr edit" "gh_stranger_not_edited"
 
 describe "github: gh acts as the fork owner when logged in to that account"
 echo "forker-token" > "$GH_STATE/account_forker"
+echo "other-token" > "$GH_STATE/account_other"
+echo other > "$GH_STATE/active"
+echo forker/repo > "$GH_STATE/push_forker-token"
 : > "$GH_LOG"
 gl_gh_capture push b
 assert_exit_ok "$CODE" "gh_account_ok"
 log="$(cat "$GH_LOG")"
-assert_contains "$log" "auth token --user forker" "gh_account_lookup"
+assert_contains "$log" "api --hostname github.com repos/forker/repo --jq .permissions.push [token forker-token]" "gh_account_owner_probed"
+assert_not_contains "$log" "[token other-token]" "gh_account_owner_first"
 assert_contains "$log" "pr list --head a --repo owner/repo --json number,url,baseRefName,headRepositoryOwner --limit 30 [token forker-token]" "gh_account_used"
 assert_not_contains "$(gl trace)" "forker-token" "gh_account_not_traced"
 
@@ -605,7 +622,43 @@ describe "github: a GH_TOKEN set by the user wins over the fork owner"
 OUT=$(GH_TOKEN=user-token gl_gh push b 2>&1) && CODE=$? || CODE=$?
 assert_exit_ok "$CODE" "gh_user_token_ok"
 log="$(cat "$GH_LOG")"
-assert_not_contains "$log" "auth token" "gh_user_token_no_lookup"
+assert_not_contains "$log" "auth " "gh_user_token_no_lookup"
+assert_not_contains "$log" ".permissions.push" "gh_user_token_no_probe"
 assert_contains "$log" "[token user-token]" "gh_user_token_used"
+
+# Same-repo push to an org repo: no account is named after the owner.
+describe "github: gh acts as the account that can push to a shared repo"
+build_stack
+install_gh_shim
+github_origin
+echo "dfaure-token" > "$GH_STATE/account_dfaure"
+echo "kdab-token" > "$GH_STATE/account_dfaure-kdab"
+echo dfaure > "$GH_STATE/active"
+echo owner/repo > "$GH_STATE/hidden_dfaure-token"
+echo owner/repo > "$GH_STATE/push_kdab-token"
+gl_gh_capture push b
+assert_exit_ok "$CODE" "gh_shared_ok"
+log="$(cat "$GH_LOG")"
+assert_contains "$log" "api --hostname github.com repos/owner/repo --jq .permissions.push [token dfaure-token]" "gh_shared_hidden_probed"
+assert_contains "$log" "api --hostname github.com repos/owner/repo --jq .permissions.push [token kdab-token]" "gh_shared_next_probed"
+assert_contains "$log" "pr create --head a --base $BASE_BRANCH --repo owner/repo --title A1 --body  [token kdab-token]" "gh_shared_create_a"
+
+describe "github: with no account able to push, gh keeps its active one"
+rm -f "$GH_STATE/push_kdab-token" "$GH_STATE"/pr_*
+: > "$GH_LOG"
+gl_gh_capture push b
+assert_exit_ok "$CODE" "gh_shared_none_ok"
+log="$(cat "$GH_LOG")"
+assert_contains "$log" "api --hostname github.com repos/owner/repo --jq .permissions.push [token kdab-token]" "gh_shared_none_probed"
+assert_not_contains "$(grep -v permissions.push <<< "$log")" "[token" "gh_shared_none_no_token"
+
+describe "github: with a single account, nothing is probed"
+rm -f "$GH_STATE/account_dfaure-kdab"
+: > "$GH_LOG"
+gl_gh_capture push b
+assert_exit_ok "$CODE" "gh_single_ok"
+log="$(cat "$GH_LOG")"
+assert_not_contains "$log" ".permissions.push" "gh_single_no_probe"
+assert_not_contains "$log" "[token" "gh_single_no_token"
 
 pass

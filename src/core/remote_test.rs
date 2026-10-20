@@ -578,3 +578,26 @@ fn extract_gh_repo_nonexistent_remote() {
     let result = super::extract_gh_repo(&test_repo.repo, "nonexistent");
     assert_eq!(result, None);
 }
+
+// ── github_tokens tests ──────────────────────────────────────────────────
+
+#[test]
+fn github_tokens_owner_then_active_first() {
+    let json = r#"{"hosts":{
+        "github.com":[
+            {"state":"success","active":false,"login":"other","token":"t-other"},
+            {"state":"success","active":true,"login":"me","token":"t-me"},
+            {"state":"error","active":false,"login":"broken","token":"t-broken"},
+            {"state":"success","active":false,"login":"notoken","token":""},
+            {"state":"success","active":false,"login":"Forker","token":"t-forker"}],
+        "ghe.example.com":[{"state":"success","active":true,"login":"work","token":"t-work"}]}}"#;
+    assert_eq!(
+        super::github_tokens(json, "forker"),
+        ["t-forker", "t-me", "t-other"]
+    );
+}
+
+#[test]
+fn github_tokens_bad_json_is_empty() {
+    assert!(super::github_tokens("not json", "me").is_empty());
+}

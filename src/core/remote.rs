@@ -230,7 +230,7 @@ fn host_port(url: &str) -> &str {
 /// as `(owner/repo, default branch)`; `None` when it is none or `gh` cannot
 /// tell.
 pub fn github_fork_parent(workdir: &Path, origin_repo: &str) -> Option<(String, String)> {
-    let gh = Gh::new(workdir, origin_repo.split('/').next());
+    let gh = Gh::new(workdir, Some(origin_repo));
     let parent = run_gh(
         &gh,
         &[
@@ -318,8 +318,8 @@ pub fn fork_push_remote(
     (push_remote != remote).then_some(push_remote)
 }
 
-/// The `gh` CLI in `workdir`, acting as the account that owns the head
-/// repository when `gh` is logged in to it, else as its active account.
+/// The `gh` CLI in `workdir`, acting as a logged-in account that can push to
+/// the head repository when `gh` has several, else as its active account.
 pub struct Gh<'a> {
     workdir: &'a Path,
     /// Passed as `GH_TOKEN` to every call.
@@ -328,7 +328,7 @@ pub struct Gh<'a> {
 
 impl<'a> Gh<'a> {
     /// A `GH_TOKEN`/`GITHUB_TOKEN` set by the user wins (Spec 011, gh account).
-    pub fn new(workdir: &'a Path, head_owner: Option<&str>) -> Self {
+    pub fn new(workdir: &'a Path, head_repo: Option<&str>) -> Self {
         let mut gh = Gh {
             workdir,
             token: None,
@@ -336,13 +336,81 @@ impl<'a> Gh<'a> {
         let user_token = ["GH_TOKEN", "GITHUB_TOKEN"]
             .iter()
             .any(|var| std::env::var_os(var).is_some());
-        if let Some(owner) = head_owner.filter(|_| !user_token) {
-            gh.token = run_gh(&gh, &["auth", "token", "--user", owner], None)
-                .map(|token| token.trim().to_string())
-                .filter(|token| !token.is_empty());
+        if let Some(head_repo) = head_repo.filter(|_| !user_token) {
+            gh.token = pushing_account_token(&gh, head_repo);
         }
         gh
     }
+}
+
+/// The token of the first github.com account that can push to `head_repo`
+/// (`owner/repo`); `None` with fewer than two accounts, as `gh` uses its only
+/// one anyway.
+fn pushing_account_token(gh: &Gh, head_repo: &str) -> Option<String> {
+    // With `--json`, gh exits 0 even when an account fails to authenticate.
+    let status = run_gh(
+        gh,
+        &[
+            "auth",
+            "status",
+            "--hostname",
+            "github.com",
+            "--json",
+            "hosts",
+            "--show-token",
+        ],
+        None,
+    )?;
+    let owner = head_repo.split('/').next().unwrap_or("");
+    let tokens = github_tokens(&status, owner);
+    if tokens.len() < 2 {
+        return None;
+    }
+    let path = format!("repos/{}", head_repo);
+    tokens.into_iter().find(|token| {
+        let account = Gh {
+            workdir: gh.workdir,
+            token: Some(token.clone()),
+        };
+        run_gh(
+            &account,
+            &[
+                "api",
+                "--hostname",
+                "github.com",
+                &path,
+                "--jq",
+                ".permissions.push",
+            ],
+            None,
+        )
+        .is_some_and(|can_push| can_push.trim() == "true")
+    })
+}
+
+/// The github.com tokens in `gh auth status --json hosts --show-token`
+/// output, ordered so the account named `owner` comes first, then the active
+/// one: they are the likeliest to push.
+fn github_tokens(json: &str, owner: &str) -> Vec<String> {
+    let Ok(status) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let Some(accounts) = status["hosts"]["github.com"].as_array() else {
+        return Vec::new();
+    };
+    let mut accounts: Vec<(&str, bool, &str)> = accounts
+        .iter()
+        .filter(|a| a["state"] == "success")
+        .filter_map(|a| {
+            let token = a["token"].as_str().filter(|t| !t.is_empty())?;
+            Some((a["login"].as_str()?, a["active"] == true, token))
+        })
+        .collect();
+    accounts.sort_by_key(|(login, active, _)| (!login.eq_ignore_ascii_case(owner), !active));
+    accounts
+        .into_iter()
+        .map(|(_, _, token)| token.to_string())
+        .collect()
 }
 
 /// Run `gh` with `args`, trace-log it, and return stdout on

@@ -364,11 +364,16 @@ The `--head` argument is prefixed with the fork owner (e.g. `user:branch`)
 and `--repo` points to the upstream repository so the PR targets the correct
 repo.
 
-**gh account:** every `gh` call acts as the account named by the push
-remote's owner when `gh auth token --user <owner>` knows it, passed as
-`GH_TOKEN`: GitHub only lets the fork's owner or collaborators open a PR from
-it, and `gh`'s active account may be another one. Otherwise, or when the user
-set `GH_TOKEN`/`GITHUB_TOKEN`, `gh` keeps its own account.
+**gh account:** GitHub only lets the head repository's owner or
+collaborators open a PR from it, and `gh`'s active account may be another one.
+When `gh auth status --hostname github.com --json hosts --show-token` lists
+several accounts, every `gh` call acts as the first that can push to the push
+remote's repository (`gh api --hostname github.com repos/<owner>/<repo> --jq
+.permissions.push` prints `true`), passed as `GH_TOKEN`. The account named
+after the owner is tried first, then the active one, and probing stops at the
+first hit; this covers both a fork and a shared repository. Otherwise, or when
+the user set `GH_TOKEN`/`GITHUB_TOKEN`, `gh` keeps its own account. Tokens
+never reach the trace.
 
 **Upstream branch skip:** If the branch being pushed is the upstream target
 branch itself (e.g. pushing `main` when tracking `origin/main`), PR creation
@@ -678,5 +683,5 @@ branches are never pushed together — that would be confusing and error-prone.
 - At least one woven branch must exist
 - Network access to the remote (for `git push`)
 - Git 2.43 or later (checked globally at startup)
-- `gh` CLI (optional, for GitHub PR creation)
+- `gh` CLI 2.81+ (optional, for GitHub PR creation; `auth status --json`)
 - `az` CLI (optional, for Azure DevOps PR creation)
