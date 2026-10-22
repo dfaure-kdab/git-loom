@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use git2::Repository;
 
 use crate::core::agent_mode;
+use crate::core::changeid;
 use crate::core::graph;
 use crate::core::hidden;
 use crate::core::msg;
@@ -861,7 +862,8 @@ fn commits_in_pr(info: &repo::RepoInfo, branch: &str, base: &str) -> Vec<git2::O
 }
 
 /// Collect the commits a PR contains, oldest first, as `(subject, body)`
-/// pairs where `body` is everything after the first line (may be empty).
+/// pairs where `body` is everything after the subject paragraph, without
+/// Change-Id trailers (may be empty).
 fn gather_branch_commits(
     repo: &Repository,
     info: &repo::RepoInfo,
@@ -873,7 +875,14 @@ fn gather_branch_commits(
         .map(|oid| {
             let commit = repo.find_commit(*oid)?;
             let subject = repo::commit_subject(&commit);
-            let body = commit.body().ok().flatten().unwrap_or("").to_string();
+            // Strip the whole message: git never reads the first paragraph as
+            // trailers, so `commit.body()` alone would keep a Change-Id that
+            // directly follows the subject.
+            let message = changeid::strip(&String::from_utf8_lossy(commit.message_bytes()));
+            let body = message
+                .split_once("\n\n")
+                .map_or("", |(_, body)| body.trim())
+                .to_string();
             Ok((subject, body))
         })
         .collect()

@@ -77,6 +77,8 @@ A new pull request is titled and described from its branch's commits:
 
 `--title` applies to the branch you named, not to the branches below it. It works on GitHub, Azure DevOps and GitLab.
 
+Change-Id trailers are left out of the description. On GitLab the server writes the description, so they stay there.
+
 ## Forcing a Push
 
 A forge that rebased your branch on the server (landing the pull request below it, for example) makes the next push fail. Loom suggests the way past it:

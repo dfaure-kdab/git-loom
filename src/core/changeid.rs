@@ -37,20 +37,71 @@ pub fn normalize(value: &str) -> Option<String> {
 /// (the form Gerrit's hook writes when `gerrit.reviewUrl` is set).
 pub fn from_message(message: &str) -> Option<String> {
     let trailers = message_trailers(message)?;
-    let mut found = None;
-    for (key, value) in trailers.iter() {
-        if key.eq_ignore_ascii_case(TRAILER) {
-            if let Some(id) = normalize(value) {
-                found = Some(id);
-            }
-        } else if key.eq_ignore_ascii_case("Link")
-            && let Some((_, tail)) = value.trim().rsplit_once("/id/")
-            && let Some(id) = normalize(tail)
+    trailers
+        .iter()
+        .filter_map(|(key, value)| trailer_id(key, value))
+        .next_back()
+}
+
+/// The Change-Id of one `key: value` trailer, in either form.
+fn trailer_id(key: &str, value: &str) -> Option<String> {
+    let key = key.trim();
+    if key.eq_ignore_ascii_case(TRAILER) {
+        normalize(value)
+    } else if key.eq_ignore_ascii_case("Link") {
+        normalize(value.trim().rsplit_once("/id/")?.1)
+    } else {
+        None
+    }
+}
+
+/// `message` without the Change-Id trailers [`from_message`] reads, for text
+/// shown to reviewers (PR descriptions); everything else is kept.
+pub fn strip(message: &str) -> String {
+    if from_message(message).is_none() {
+        return message.to_string();
+    }
+    let lines: Vec<&str> = message.trim_end().lines().collect();
+    // A line starting with whitespace continues the trailer above it.
+    let is_id = |line: &&str| {
+        !line.starts_with(char::is_whitespace)
+            && line
+                .split_once(':')
+                .is_some_and(|(key, value)| trailer_id(key, value).is_some())
+    };
+    let blank = |line: &&str| line.trim().is_empty();
+    // The block is the paragraph holding the last id line, not the last
+    // paragraph: libgit2 skips a trailing `#` or `Conflicts:` run.
+    let Some(last) = lines.iter().rposition(is_id) else {
+        return message.to_string();
+    };
+    let start = lines[..last].iter().rposition(blank).map_or(0, |i| i + 1);
+    let end = lines[last..]
+        .iter()
+        .position(blank)
+        .map_or(lines.len(), |i| last + i);
+    let kept: Vec<&str> = lines[start..end]
+        .iter()
+        .copied()
+        .filter(|line| !is_id(line))
+        .collect();
+    let mut head = &lines[..start];
+    if kept.is_empty() {
+        while let Some((line, rest)) = head.split_last()
+            && blank(line)
         {
-            found = Some(id);
+            head = rest;
         }
     }
-    found
+    let mut out = head
+        .iter()
+        .chain(&kept)
+        .chain(&lines[end..])
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    out.push('\n');
+    out
 }
 
 /// The trailers of a commit message. libgit2, like `git interpret-trailers`,
