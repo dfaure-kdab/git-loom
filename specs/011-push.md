@@ -472,6 +472,8 @@ sees:
 - **No commits** (empty branch): `--title`, else the branch name, is the title,
   with an empty description.
 
+Change-Id trailers (both forms, Spec 002) are left out of the description.
+
 On GitLab the server builds the MR itself; `--title` is passed as
 `merge_request.title`, which GitLab also applies to an existing MR.
 

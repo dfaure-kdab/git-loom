@@ -130,6 +130,55 @@ fn generate_works_on_an_unborn_branch() {
 }
 
 #[test]
+fn strip_drops_both_forms_and_keeps_other_trailers() {
+    let msg = format!(
+        "Subject\n\nBody.\n\nSigned-off-by: A <a@x>\nChange-Id: {ID}\nLink: https://r.example.com/id/{ID}\nLink: https://bugs.example.com/42\n"
+    );
+    assert_eq!(
+        strip(&msg),
+        "Subject\n\nBody.\n\nSigned-off-by: A <a@x>\nLink: https://bugs.example.com/42\n"
+    );
+}
+
+#[test]
+fn strip_drops_an_emptied_trailer_block() {
+    assert_eq!(
+        strip(&format!("Subject\n\nBody.\n\nChange-Id: {ID}\n")),
+        "Subject\n\nBody.\n"
+    );
+    assert_eq!(strip(&format!("Subject\n\nChange-Id: {ID}\n")), "Subject\n");
+}
+
+#[test]
+fn strip_finds_the_block_before_a_conflicts_run() {
+    let msg = format!("Subject\n\nBody.\n\nChange-Id: {ID}\n\nConflicts:\n\tfoo.c\n");
+    assert_eq!(strip(&msg), "Subject\n\nBody.\n\nConflicts:\n\tfoo.c\n");
+}
+
+#[test]
+fn strip_keeps_mentions_outside_the_trailer_block() {
+    let msg = format!("Subject\n\nChange-Id: {ID}\n\nMore text here.\n");
+    assert_eq!(strip(&msg), msg);
+    let msg = format!("Subject\n\nChange-Id: {ID}\n\nBody.\n\nChange-Id: {ID}\n");
+    assert_eq!(
+        strip(&msg),
+        format!("Subject\n\nChange-Id: {ID}\n\nBody.\n")
+    );
+}
+
+// libgit2 accepts a block with free text in it when a git trailer such as
+// Signed-off-by makes up a quarter of its lines.
+#[test]
+fn strip_keeps_free_text_in_the_trailer_block() {
+    let msg = format!("Subject\n\nSigned-off-by: A <a@x>\nsee the list\nChange-Id: {ID}\n");
+    assert_eq!(from_message(&msg).as_deref(), Some(ID));
+    assert_eq!(
+        strip(&msg),
+        "Subject\n\nSigned-off-by: A <a@x>\nsee the list\n"
+    );
+}
+
+#[test]
 fn stamp_adds_a_paragraph_when_there_is_no_trailer_block() {
     assert_eq!(
         stamp("Fix bug", ID, None),

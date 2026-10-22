@@ -743,6 +743,30 @@ fn pr_title_comes_from_a_lone_commit_or_title_or_nothing_when_none_can_be_asked(
 }
 
 #[test]
+fn pr_description_leaves_out_change_ids() {
+    let test_repo = TestRepo::new_with_remote();
+    let id = |n: u8| format!("I{}", n.to_string().repeat(40));
+    test_repo.commit(&format!("A1\n\nWhy A1\n\nChange-Id: {}", id(1)), "a1.txt");
+    test_repo.commit(&format!("A2\n\nChange-Id: {}", id(2)), "a2.txt");
+    test_repo.create_branch("feature-a");
+    test_repo.commit(&format!("B1\n\nWhy B1\n\nChange-Id: {}", id(3)), "b1.txt");
+    test_repo.create_branch("feature-b");
+    let info = crate::core::repo::gather_repo_info(&test_repo.repo, false, 1).unwrap();
+    let pr = |branch: &str, base: &str, title: Option<&str>| {
+        super::pr_title_and_description(&test_repo.repo, &info, branch, base, title, false).unwrap()
+    };
+
+    assert_eq!(
+        pr("feature-a", "main", Some("Add A")),
+        Some(("Add A".to_string(), "A1\n\nWhy A1\n\n---\n\nA2".to_string()))
+    );
+    assert_eq!(
+        pr("feature-b", "feature-a", None),
+        Some(("B1".to_string(), "Why B1".to_string()))
+    );
+}
+
+#[test]
 fn push_report_serializes_only_what_happened() {
     let layer = |branch: &str, base: &str| super::Layer {
         branch: branch.to_string(),
